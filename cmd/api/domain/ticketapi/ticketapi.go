@@ -17,6 +17,8 @@ type TicketQuery struct {
 	Number    int `form:"number" validate:"required,min=1,max=6"`
 	LowPrice  int `form:"low_price" validate:"required,min=0"`
 	HighPrice int `form:"high_price" validate:"required,min=0,gtfield=LowPrice"`
+	Page      int `form:"page" validate:"required,min=1"`
+	PageSize  int `form:"page_size" validate:"required,min=1,max=100"`
 }
 
 func GetTicketsHandler(ticketService *ticket.TicketService,
@@ -62,7 +64,7 @@ func GetTicketsHandler(ticketService *ticket.TicketService,
 
 		log.Println("verify query")
 
-		tickets, err := ticketService.GetTickets(ctx, eventID, query.Number, query.LowPrice, query.HighPrice, venueService, eventService)
+		tickets, err := ticketService.GetTickets(ctx, eventID, query.Number, query.LowPrice, query.HighPrice, query.Page, query.PageSize, venueService, eventService)
 		if err != nil {
 			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve tickets"})
 			log.Fatal(err)
