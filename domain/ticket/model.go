@@ -1,11 +1,13 @@
 package ticket
 
 type Ticket struct {
-	TicketID int64  `json:"ticketID"` // Use int64 instead of long in Go
-	Section  string `json:"section"`
-	Row      string `json:"row"`
-	Seats    []Seat `json:"seats"`
-	Price    int    `json:"price"`
+	EventID     int    `json:"event_id"`
+	SectionID   int    `json:"section_id"`
+	SectionName string `json:"section_name"`
+	RowID       int    `json:"row_id"`
+	RowName     string `json:"row_name"`
+	Price       int    `json:"price"`
+	Length      int    `json:"length"`
 }
 
 type Seat struct {
@@ -13,6 +15,8 @@ type Seat struct {
 }
 
 type BookingRequest struct {
-	UserID   string `json:"user_id"`
-	TicketID string `json:"ticket_id"`
+	Section string `json:"section"`
+	Row     string `json:"row"`
+	Price   int    `json:"price"`
+	Length  int    `json:"length"`
 }

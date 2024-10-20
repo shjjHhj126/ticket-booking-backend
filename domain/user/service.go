@@ -1,12 +1,12 @@
 package user
 
-import "github.com/jmoiron/sqlx"
+import "database/sql"
 
 type UserService struct {
 	repo *UserRepository
 }
 
-func NewUserService(db *sqlx.DB) *UserService {
+func NewUserService(db *sql.DB) *UserService {
 	return &UserService{
 		repo: NewUserRepository(db),
 	}

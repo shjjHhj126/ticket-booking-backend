@@ -1,6 +1,7 @@
 package rabbitmq
 
 import (
+	"fmt"
 	"log"
 	"os"
 
@@ -10,14 +11,17 @@ import (
 )
 
 type RabbitMQ struct {
-	conn      *amqp.Connection
-	channel   *amqp.Channel
-	queueName string
+	conn           *amqp.Connection //TCP connection
+	bookingChannel *amqp.Channel    //virtual connection, used to send and receive messages.
+	paymentChannel *amqp.Channel
 }
 
+// queues are buffers "inside" channel
+
 var (
-	defaultRabbitMQURL = os.Getenv("RABBIT_MQ_URL")
-	defaultQueueName   = os.Getenv("QUEUE_NAME")
+	defaultRabbitMQURL      = os.Getenv("RABBIT_MQ_URL")
+	defaultBookingQueueName = os.Getenv("BOOKING_QUEUE_NAME")
+	defaultPaymentQueueName = os.Getenv("PAYMENT_QUEUE_NAME")
 )
 
 func InitRabbitMQ() *RabbitMQ {
@@ -28,54 +32,135 @@ func InitRabbitMQ() *RabbitMQ {
 		return nil
 	}
 
-	ch, err := conn.Channel()
+	// Create separate channels for booking and payment queues
+	bookingChannel, err := conn.Channel()
 	if err != nil {
-		conn.Close()
-		log.Fatal(err)
-		return nil
+		log.Fatal("Failed to open booking channel:", err)
 	}
 
-	queueName := util.GetEnvOrDefault("QUEUE_NAME", defaultQueueName)
+	paymentChannel, err := conn.Channel()
+	if err != nil {
+		log.Fatal("Failed to open payment channel:", err)
+	}
 
-	_, err = ch.QueueDeclare(
-		queueName, // name
-		true,      // durable
-		false,     // delete when unused
-		false,     // exclusive
-		false,     // no-wait
-		nil,       // arguments
+	// Declare booking queue on its own channel
+	bookingQueueName := util.GetEnvOrDefault("BOOKING_QUEUE_NAME", defaultBookingQueueName)
+	_, err = bookingChannel.QueueDeclare(
+		bookingQueueName, true, false, false, false, nil,
 	)
 	if err != nil {
-		ch.Close()
-		conn.Close()
-		log.Fatal(err)
-		return nil
+		log.Fatal("Failed to declare booking queue:", err)
+	}
+
+	// Declare payment queue on its own channel
+	paymentQueueName := util.GetEnvOrDefault("PAYMENT_QUEUE_NAME", defaultPaymentQueueName)
+	_, err = paymentChannel.QueueDeclare(
+		paymentQueueName, true, false, false, false, nil,
+	)
+	if err != nil {
+		log.Fatal("Failed to declare payment queue:", err)
 	}
 
 	return &RabbitMQ{
-		conn:      conn,
-		channel:   ch,
-		queueName: queueName,
+		conn:           conn,
+		bookingChannel: bookingChannel,
+		paymentChannel: paymentChannel,
 	}
 }
 
-func (r *RabbitMQ) Close() {
-	if r.channel != nil {
-		r.channel.Close()
+func (r *RabbitMQ) Close() error {
+	if r.bookingChannel != nil {
+		if err := r.bookingChannel.Close(); err != nil {
+			return err
+		}
 	}
+
+	if r.paymentChannel != nil {
+		if err := r.paymentChannel.Close(); err != nil {
+			return err
+		}
+	}
+
+	// Close the connection if it exists
 	if r.conn != nil {
-		r.conn.Close()
+		if err := r.conn.Close(); err != nil {
+			return err
+		}
 	}
+
+	return nil
 }
 
-func (r *RabbitMQ) PublishMessage(body []byte) error {
-	return r.channel.Publish(
-		"",          // exchange
-		r.queueName, // routing key
-		false,       // mandatory
-		false,       // immediate
+func (r *RabbitMQ) PublishMessage(queueName string, body []byte) error {
+	var channel *amqp.Channel
+
+	if queueName == util.GetEnvOrDefault("BOOKING_QUEUE_NAME", defaultBookingQueueName) {
+		channel = r.bookingChannel
+	} else if queueName == util.GetEnvOrDefault("PAYMENT_QUEUE_NAME", defaultPaymentQueueName) {
+		channel = r.paymentChannel
+	} else {
+		log.Printf("Unknown queue name: %s", queueName)
+		return fmt.Errorf("unknown queue name: %s", queueName)
+	}
+
+	err := channel.Publish(
+		"",        // exchange
+		queueName, // routing key
+		false,     // mandatory
+		false,     // immediate
 		amqp.Publishing{
 			ContentType: "application/json",
 			Body:        body,
-		})
+		},
+	)
+
+	if err != nil {
+		log.Printf("Failed to publish message to queue %s: %v", queueName, err)
+		return err
+	}
+
+	return nil
+}
+
+func (r *RabbitMQ) ConsumeMessages(queueName string, handler func([]byte) error) error {
+	var channel *amqp.Channel
+
+	if queueName == util.GetEnvOrDefault("BOOKING_QUEUE_NAME", defaultBookingQueueName) {
+		channel = r.bookingChannel
+	} else if queueName == util.GetEnvOrDefault("PAYMENT_QUEUE_NAME", defaultPaymentQueueName) {
+		channel = r.paymentChannel
+	} else {
+		log.Printf("Unknown queue name: %s", queueName)
+		return fmt.Errorf("unknown queue name: %s", queueName)
+	}
+
+	msgs, err := channel.Consume(
+		queueName, // queue
+		"",        // consumer
+		false,     // auto-ack (manual ack for reliability)
+		false,     // exclusive
+		false,     // no-local
+		false,     // no-wait
+		nil,       // args
+	)
+	if err != nil {
+		return err
+	}
+
+	go func() {
+		for msg := range msgs {
+			if err := handler(msg.Body); err != nil {
+				log.Printf("Failed to process message: %v", err)
+				if err := msg.Nack(false, true); err != nil {
+					log.Printf("Failed to NACK message: %v", err)
+				}
+			} else {
+				if err := msg.Ack(false); err != nil {
+					log.Printf("Failed to ACK message: %v", err)
+				}
+			}
+		}
+	}()
+
+	return nil
 }

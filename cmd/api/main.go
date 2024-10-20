@@ -17,14 +17,19 @@ func main() {
 	}
 
 	ginServer := server.NewServer()
+	defer ginServer.Close()
 
 	ginServer.InitServices()
 	ginServer.SetupRoutes()
+
+	ginServer.AddMiddlewares()
 
 	// // Start worker goroutines
 	// for i := 0; i < 5; i++ {
 	// 	go startWorker(server.rmq, server.rdb, server.db)
 	// }
 
-	ginServer.Run(":8080")
+	if err := ginServer.Run(":8080"); err != nil {
+		log.Fatalf("Server failed to start: %v", err)
+	}
 }

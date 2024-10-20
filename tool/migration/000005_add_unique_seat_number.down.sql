@@ -1,0 +1,2 @@
+ALTER TABLE seats
+DROP CONSTRAINT IF EXISTS unique_row_seat;

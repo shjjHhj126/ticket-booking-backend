@@ -1,4 +1,4 @@
-package venueApi
+package venueapi
 
 import (
 	"fmt"
@@ -7,12 +7,19 @@ import (
 	"ticket-booking-backend/domain/venue"
 
 	"github.com/gin-gonic/gin"
+	"github.com/go-playground/validator/v10"
 )
 
-func CreateVenueHandler(service *venue.VenueService) gin.HandlerFunc {
+func CreateVenueHandler(service *venue.VenueService, validator *validator.Validate) gin.HandlerFunc {
 	return func(ctx *gin.Context) {
 		var v venue.Venue
 		if err := ctx.ShouldBindJSON(&v); err != nil {
+			ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+
+		err := validator.Struct(v)
+		if err != nil {
 			ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}

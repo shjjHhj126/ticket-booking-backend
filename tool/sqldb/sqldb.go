@@ -1,15 +1,14 @@
 package sqldb
 
 import (
+	"database/sql"
 	"fmt"
 	"log"
 
 	"ticket-booking-backend/tool/util"
 	"time"
 
-	_ "github.com/jackc/pgx/v5"
-	_ "github.com/jackc/pgx/v5/stdlib"
-	"github.com/jmoiron/sqlx"
+	_ "github.com/lib/pq"
 )
 
 const (
@@ -21,7 +20,7 @@ const (
 	defaultDBMaxConn  = 10
 )
 
-func InitPostgres() *sqlx.DB {
+func InitPostgres() *sql.DB {
 	dbHost := util.GetEnvOrDefault("POSTGRES_HOST", defaultDBHost)
 	dbPort := util.GetEnvOrDefault("POSTGRES_PORT", defaultDBPort)
 	dbUser := util.GetEnvOrDefault("POSTGRES_USER", defaultDBUser)
@@ -34,7 +33,7 @@ func InitPostgres() *sqlx.DB {
 
 	log.Printf("Attempting to connect to PostgreSQL with %s", dsn)
 
-	db, err := sqlx.Connect("pgx", dsn)
+	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		log.Fatalf("Failed to connect to PostgreSQL: %v", err)
 	}
@@ -48,14 +47,14 @@ func InitPostgres() *sqlx.DB {
 		log.Fatalf("Failed to ping PostgreSQL: %v", err)
 	}
 
-	log.Printf("Successfully connected to PostgreSQL. Max open connections: %d", db.Stats().MaxOpenConnections)
+	log.Printf("Successfully connected to PostgreSQL. Max open connections: %d", dbMaxConn)
 
 	cleanupExpiredSessions(db)
 
 	return db
 }
 
-func cleanupExpiredSessions(db *sqlx.DB) {
+func cleanupExpiredSessions(db *sql.DB) {
 	_, err := db.Exec("DELETE FROM sessions WHERE expires_at < NOW();")
 	if err != nil {
 		log.Printf("Error cleaning up expired sessions: %v", err)

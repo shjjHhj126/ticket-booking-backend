@@ -1,12 +1,16 @@
 package user
 
-import "github.com/jmoiron/sqlx"
+import (
+	"fmt"
+
+	"database/sql"
+)
 
 type UserRepository struct {
-	db *sqlx.DB
+	db *sql.DB
 }
 
-func NewUserRepository(db *sqlx.DB) *UserRepository {
+func NewUserRepository(db *sql.DB) *UserRepository {
 	return &UserRepository{db: db}
 }
 
@@ -14,7 +18,10 @@ func (repo *UserRepository) Create(user *User) error {
 
 	query := "INSERT INTO users (username, email, password_hash) VALUES ($1, $2, $3)"
 
-	repo.db.Exec(query, user.Username, user.Email)
+	_, err := repo.db.Exec(query, user.Username, user.Email, user.HashedPassword)
+	if err != nil {
+		return fmt.Errorf("failed to insert user: %w", err)
+	}
 
 	return nil
 }

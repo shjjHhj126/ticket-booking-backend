@@ -16,6 +16,5 @@ CREATE TABLE IF NOT EXISTS rows(
 CREATE TABLE IF NOT EXISTS seats(
     id bigserial PRIMARY KEY,
     seat_number int NOT NULL,
-    price int NOT NULL,
     row_id bigint NOT NULL REFERENCES rows (id) ON DELETE CASCADE
 );
