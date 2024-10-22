@@ -23,6 +23,14 @@ type SetSeatsPriceDTO struct {
 	Price   int   `db:"price" json:"price" validate:"required,min=0"`
 }
 
+type ReservationDTO struct {
+	EventID   int `json:"event_id" validate:"required"`
+	SectionID int `json:"section_id" validate:"required"`
+	RowID     int `json:"row_id" validate:"required"`
+	Price     int `json:"price" validate:"required,min=0"`
+	Length    int `json:"length" validate:"required,min=1,max=6"`
+}
+
 type PostEventDTO struct {
 	Name        string    `json:"name" validate:"required,min=3,max=100"`
 	StartTime   time.Time `json:"start_time" validate:"required"`
@@ -43,4 +51,31 @@ func validateEventTimes(fl validator.FieldLevel) bool {
 // RegisterCustomValidations registers custom validations for the validator
 func RegisterCustomValidations(v *validator.Validate) {
 	v.RegisterValidation("gtfield", validateEventTimes)
+}
+
+type ReservationMsg struct {
+	EventID   int    `json:"event_id"`
+	SectionID int    `json:"section_id"`
+	RowID     int    `json:"row_id"`
+	Price     int    `json:"price"`
+	Length    int    `json:"length"`
+	SessionID string `json:"session_id"` //track user
+}
+
+type BroadcastMsg struct {
+	EventID     int  `json:"event_id"`
+	SectionID   int  `json:"section_id"`
+	RowID       int  `json:"row_id"`
+	Price       int  `json:"price"`
+	MaxLength   int  `json:"max_length"`
+	IsAvailable bool `json:"is_available"`
+}
+
+type NotificationMsg struct {
+	EventID   int    `json:"event_id"`
+	SectionID int    `json:"section_id"`
+	RowID     int    `json:"row_id"`
+	Price     int    `json:"price"`
+	Length    int    `json:"length"`
+	SessionID string `json:"session_id"` //to whom
 }

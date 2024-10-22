@@ -32,34 +32,16 @@ func InitRabbitMQ() *RabbitMQ {
 		return nil
 	}
 
-	// Create separate channels for booking and payment queues
-	bookingChannel, err := conn.Channel()
-	if err != nil {
-		log.Fatal("Failed to open booking channel:", err)
-	}
+	// Initialize channels and declare queues
+	bookingChannel := createChannel(conn, "booking")
+	paymentChannel := createChannel(conn, "payment")
 
-	paymentChannel, err := conn.Channel()
-	if err != nil {
-		log.Fatal("Failed to open payment channel:", err)
-	}
-
-	// Declare booking queue on its own channel
+	// Declare queues
 	bookingQueueName := util.GetEnvOrDefault("BOOKING_QUEUE_NAME", defaultBookingQueueName)
-	_, err = bookingChannel.QueueDeclare(
-		bookingQueueName, true, false, false, false, nil,
-	)
-	if err != nil {
-		log.Fatal("Failed to declare booking queue:", err)
-	}
+	declareQueue(bookingChannel, bookingQueueName)
 
-	// Declare payment queue on its own channel
 	paymentQueueName := util.GetEnvOrDefault("PAYMENT_QUEUE_NAME", defaultPaymentQueueName)
-	_, err = paymentChannel.QueueDeclare(
-		paymentQueueName, true, false, false, false, nil,
-	)
-	if err != nil {
-		log.Fatal("Failed to declare payment queue:", err)
-	}
+	declareQueue(paymentChannel, paymentQueueName)
 
 	return &RabbitMQ{
 		conn:           conn,
@@ -74,7 +56,6 @@ func (r *RabbitMQ) Close() error {
 			return err
 		}
 	}
-
 	if r.paymentChannel != nil {
 		if err := r.paymentChannel.Close(); err != nil {
 			return err
@@ -91,16 +72,20 @@ func (r *RabbitMQ) Close() error {
 	return nil
 }
 
-func (r *RabbitMQ) PublishMessage(queueName string, body []byte) error {
+func (r *RabbitMQ) PublishMessage(action string, body []byte) error {
 	var channel *amqp.Channel
+	var queueName string
 
-	if queueName == util.GetEnvOrDefault("BOOKING_QUEUE_NAME", defaultBookingQueueName) {
+	switch action {
+	case "book":
 		channel = r.bookingChannel
-	} else if queueName == util.GetEnvOrDefault("PAYMENT_QUEUE_NAME", defaultPaymentQueueName) {
+		queueName = "booking-queue"
+	case "pay":
 		channel = r.paymentChannel
-	} else {
-		log.Printf("Unknown queue name: %s", queueName)
-		return fmt.Errorf("unknown queue name: %s", queueName)
+		queueName = "payment-queue"
+	default:
+		log.Printf(`Unknown action : %s, should be either "book" or "pay" `, action)
+		return fmt.Errorf("unknown action name in publish message : %s", action)
 	}
 
 	err := channel.Publish(
@@ -122,19 +107,24 @@ func (r *RabbitMQ) PublishMessage(queueName string, body []byte) error {
 	return nil
 }
 
-func (r *RabbitMQ) ConsumeMessages(queueName string, handler func([]byte) error) error {
+func (r *RabbitMQ) ConsumeMessages(action string, handler func([]byte) error) error {
 	var channel *amqp.Channel
+	var queueName string
 
-	if queueName == util.GetEnvOrDefault("BOOKING_QUEUE_NAME", defaultBookingQueueName) {
+	switch action {
+	case "book":
 		channel = r.bookingChannel
-	} else if queueName == util.GetEnvOrDefault("PAYMENT_QUEUE_NAME", defaultPaymentQueueName) {
+		queueName = "booking-queue"
+	case "pay":
 		channel = r.paymentChannel
-	} else {
-		log.Printf("Unknown queue name: %s", queueName)
-		return fmt.Errorf("unknown queue name: %s", queueName)
+		queueName = "payment-queue"
+
+	default:
+		log.Printf(`Unknown action : %s, should be either "book" or "pay" `, action)
+		return fmt.Errorf("unknown action name in publish message : %s", action)
 	}
 
-	msgs, err := channel.Consume(
+	msgs, err := channel.Consume( //set the consumer of the channel and consume the messages in msgs
 		queueName, // queue
 		"",        // consumer
 		false,     // auto-ack (manual ack for reliability)
@@ -151,7 +141,7 @@ func (r *RabbitMQ) ConsumeMessages(queueName string, handler func([]byte) error)
 		for msg := range msgs {
 			if err := handler(msg.Body); err != nil {
 				log.Printf("Failed to process message: %v", err)
-				if err := msg.Nack(false, true); err != nil {
+				if err := msg.Nack(false, true); err != nil { // second param in msg.Nack() means requeue
 					log.Printf("Failed to NACK message: %v", err)
 				}
 			} else {
@@ -163,4 +153,27 @@ func (r *RabbitMQ) ConsumeMessages(queueName string, handler func([]byte) error)
 	}()
 
 	return nil
+}
+
+func createChannel(conn *amqp.Connection, channelName string) *amqp.Channel {
+	channel, err := conn.Channel()
+	if err != nil {
+		log.Fatalf("Failed to open %s channel: %v", channelName, err)
+	}
+	return channel
+}
+
+// declareQueue declares a queue with the given name on the specified channel
+func declareQueue(channel *amqp.Channel, queueName string) {
+	_, err := channel.QueueDeclare(
+		queueName, // name
+		true,      // durable
+		false,     // delete when unused
+		false,     // exclusive
+		false,     // no-wait
+		nil,       // arguments
+	)
+	if err != nil {
+		log.Fatalf("Failed to declare %s queue: %v", queueName, err)
+	}
 }

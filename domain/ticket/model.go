@@ -9,14 +9,3 @@ type Ticket struct {
 	Price       int    `json:"price"`
 	Length      int    `json:"length"`
 }
-
-type Seat struct {
-	SeatNumber int `json:"seat_number"`
-}
-
-type BookingRequest struct {
-	Section string `json:"section"`
-	Row     string `json:"row"`
-	Price   int    `json:"price"`
-	Length  int    `json:"length"`
-}

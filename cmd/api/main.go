@@ -20,14 +20,10 @@ func main() {
 	defer ginServer.Close()
 
 	ginServer.InitServices()
+	ginServer.AddMiddlewares() //before routes!
 	ginServer.SetupRoutes()
 
-	ginServer.AddMiddlewares()
-
-	// // Start worker goroutines
-	// for i := 0; i < 5; i++ {
-	// 	go startWorker(server.rmq, server.rdb, server.db)
-	// }
+	ginServer.StartConsumers() //running in background
 
 	if err := ginServer.Run(":8080"); err != nil {
 		log.Fatalf("Server failed to start: %v", err)

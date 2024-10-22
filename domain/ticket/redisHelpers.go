@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"strconv"
 	"strings"
 	"ticket-booking-backend/domain/venue"
@@ -185,12 +186,15 @@ func getConsecutiveSeats(ctx context.Context,
 		return nil, fmt.Errorf("error retrieving data from Redis: %w", err)
 	}
 
-	var seats map[string]string
+	var seats map[string]interface{}
 	if err := json.Unmarshal([]byte(seatsData), &seats); err != nil {
 		return nil, fmt.Errorf("error unmarshaling seats data: %w", err)
 	}
 
-	seatStatuses := seats["seats"]
+	seatStatuses, ok := seats["seats"].(string)
+	if !ok {
+		return nil, fmt.Errorf("error: seats data is not a string")
+	}
 	var consecutiveSeats []venue.ConsecutiveSeats
 
 	// Split the seats string into a slice of strings
@@ -214,7 +218,7 @@ func getConsecutiveSeats(ctx context.Context,
 				// Save current result
 				consecutiveSeats = append(consecutiveSeats, venue.ConsecutiveSeats{
 					RowID:   rowID,
-					RowName: seats["row_name"],
+					RowName: seats["row_name"].(string),
 					Length:  count,
 				})
 				// reset
@@ -228,7 +232,7 @@ func getConsecutiveSeats(ctx context.Context,
 	if startSeat != -1 {
 		consecutiveSeats = append(consecutiveSeats, venue.ConsecutiveSeats{
 			RowID:   rowID,
-			RowName: seats["row_name"],
+			RowName: seats["row_name"].(string),
 			Length:  count,
 		})
 	}
@@ -272,4 +276,12 @@ func cacheConsecutiveSeats(ctx context.Context,
 	log.Print("cache consecutive seat 1")
 
 	return getConsecutiveSeats(ctx, tx, eventID, sectionID, priceBlock)
+}
+
+func readLuaScript(scriptPath string) (string, error) {
+	content, err := os.ReadFile(scriptPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read Lua script: %w", err)
+	}
+	return string(content), nil
 }

@@ -2,10 +2,15 @@ package ticket
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"log"
+	"ticket-booking-backend/cmd/api/websocket"
 	"ticket-booking-backend/domain/event"
 	"ticket-booking-backend/domain/venue"
+	"ticket-booking-backend/dto"
 	"ticket-booking-backend/tool/rabbitmq"
+	"time"
 
 	"database/sql"
 
@@ -14,9 +19,10 @@ import (
 )
 
 type TicketService struct {
-	mq          *rabbitmq.RabbitMQ
-	redisClient *redislib.Client
-	db          *sql.DB
+	mq                *rabbitmq.RabbitMQ
+	redisClient       *redislib.Client
+	db                *sql.DB
+	connectionManager *websocket.ConnectionManager
 }
 
 func NewTicketService(redisClient *redislib.Client, rmq *rabbitmq.RabbitMQ, db *sql.DB) *TicketService {
@@ -101,50 +107,128 @@ func (s *TicketService) GetTickets(ctx *gin.Context, eventID, number, lowPrice, 
 	return tickets, nil
 }
 
-func getSectionIDs(ctx context.Context, tx *redislib.Tx, eventID, lowPrice, highPrice int, venueService *venue.VenueService) ([]int, error) {
-	sectionIDs, err := getSectionsByPriceRange(ctx, tx, eventID, lowPrice, highPrice)
+func (s *TicketService) ReserveTicket(ctx *gin.Context, eventID, sectionID, rowID, price, length int) error {
+	sessionID, exists := ctx.Get("session_id")
+	if !exists {
+		return fmt.Errorf("session ID not found in context")
+	}
+
+	msg := dto.ReservationMsg{
+		EventID:   eventID,
+		SectionID: sectionID,
+		RowID:     rowID,
+		Price:     price,
+		Length:    length,
+		SessionID: sessionID.(string),
+	}
+
+	msgBytes, err := json.Marshal(msg)
 	if err != nil {
-		return []int{}, err
+		return fmt.Errorf("failed to serialize message: %w", err)
 	}
 
-	if len(sectionIDs) == 0 {
-		// If no sections found in Redis, fetch from DB and cache it atomically in Redis
-		sectionIDs, err = cacheSections(ctx, tx, eventID, lowPrice, highPrice, venueService)
-		if err != nil {
-			return []int{}, err
-		}
+	err = s.mq.PublishMessage("book", msgBytes)
+	if err != nil {
+		return fmt.Errorf("failed to push to message queue: %w", err)
 	}
 
-	return sectionIDs, nil
+	return nil
 }
 
-func getPriceBlocks(ctx context.Context, tx *redislib.Tx, eventID, sectionID, lowPrice, highPrice int, venueService *venue.VenueService) ([]venue.SeatPriceBlock, error) {
-	seatBlocks, err := getSeatPriceBlocks(ctx, tx, eventID, sectionID, lowPrice, highPrice)
+func (s *TicketService) HandleBookingMessage(data []byte) error {
+	var msg dto.ReservationMsg
+	if err := json.Unmarshal(data, &msg); err != nil {
+		return fmt.Errorf("failed to unmarshal msg, error: %w", err)
+	}
+
+	// Read the Lua script
+	script, err := readLuaScript("reserve_seats_return_broadcast_info.lua")
 	if err != nil {
-		return []venue.SeatPriceBlock{}, err
+		return err
 	}
 
-	if len(seatBlocks) == 0 {
-		seatBlocks, err = cacheSeatPriceBlocks(ctx, tx, eventID, sectionID, lowPrice, highPrice, venueService)
-		if err != nil {
-			return []venue.SeatPriceBlock{}, err
-		}
+	// Execute the Lua script
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	result, err := s.redisClient.Eval(ctx, script,
+		[]string{},
+		fmt.Sprintf("%d", msg.EventID),
+		fmt.Sprintf("%d", msg.SectionID),
+		fmt.Sprintf("%d", msg.RowID),
+		fmt.Sprintf("%d", msg.Length),
+		msg.SessionID,
+	).Result()
+	if err != nil {
+		return fmt.Errorf("failed to execute Lua script: %w", err)
 	}
 
-	return seatBlocks, nil
+	resultMap, ok := result.(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("unexpected result format from Lua script")
+	}
+
+	// Extract the reserved seats
+	reservedSeats, ok := resultMap["reserved"].(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("failed to parse reserved seats")
+	}
+
+	// Extract max Consecutive length
+	maxConsecutive, ok := resultMap["maxConsecutive"].(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("failed to parse max consecutive lengths")
+	}
+
+	// Notify WebSocket client
+	if err := s.NotifyReservation(msg, reservedSeats); err != nil {
+		log.Printf("failed to notify WebSocket client: %v", err)
+	}
+
+	// Broadcast reservation message to all clients
+	if err := s.broadcastReservation(msg, maxConsecutive); err != nil {
+		log.Printf("failed to notify WebSocket clients: %v", err)
+	}
+
+	return nil
 }
 
-func getConsecutiveSeatBlocks(ctx context.Context, tx *redislib.Tx, eventID, sectionID int, venueService *venue.VenueService, priceBlock *venue.SeatPriceBlock) ([]venue.ConsecutiveSeats, error) {
-	consecutiveSeats, err := getConsecutiveSeats(ctx, tx, eventID, sectionID, priceBlock)
-	if err != nil {
-		return []venue.ConsecutiveSeats{}, err
+func (s *TicketService) NotifyReservation(msg dto.ReservationMsg, reservedSeats map[string]interface{}) error {
+	log.Printf("reservedSeats:%+v", reservedSeats)
+
+	reservationMsg := dto.ReservationMsg{
+		EventID:   msg.EventID,
+		SectionID: msg.SectionID,
+		RowID:     msg.RowID,
+		Price:     msg.Price,
+		Length:    msg.Length,
+		SessionID: msg.SessionID,
 	}
 
-	if len(consecutiveSeats) == 0 {
-		consecutiveSeats, err = cacheConsecutiveSeats(ctx, tx, eventID, sectionID, priceBlock.RowID, priceBlock, venueService)
-		if err != nil {
-			return []venue.ConsecutiveSeats{}, err
-		}
+	data, err := json.Marshal(reservationMsg)
+	if err != nil {
+		return fmt.Errorf("error marshaling reservation message: %w", err)
 	}
-	return consecutiveSeats, nil
+
+	return s.connectionManager.NotifyReservation(data)
+}
+
+func (s *TicketService) broadcastReservation(msg dto.ReservationMsg, maxConsecutive map[string]interface{}) error {
+	log.Printf("maxConsecutive:", maxConsecutive)
+
+	broadcastMsg := dto.BroadcastMsg{
+		EventID:     msg.EventID,
+		SectionID:   msg.SectionID,
+		RowID:       msg.RowID,
+		Price:       msg.Price,
+		MaxLength:   0,
+		IsAvailable: false,
+	}
+
+	data, err := json.Marshal(broadcastMsg)
+	if err != nil {
+		return fmt.Errorf("error marshaling broadcast message: %w", err)
+	}
+
+	return s.connectionManager.BroadcastReservation(data)
 }

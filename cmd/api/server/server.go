@@ -9,6 +9,7 @@ import (
 	"ticket-booking-backend/cmd/api/domain/venueapi"
 	"ticket-booking-backend/cmd/api/domain/websocketapi"
 	"ticket-booking-backend/cmd/api/session"
+	"ticket-booking-backend/cmd/api/websocket"
 	"ticket-booking-backend/domain/artist"
 	"ticket-booking-backend/domain/event"
 	"ticket-booking-backend/domain/ticket"
@@ -26,12 +27,13 @@ import (
 func NewServer() *Server {
 	redisClient := redis.InitRedis()
 	return &Server{
-		router:         gin.Default(),
-		redisClient:    redisClient,
-		db:             sqldb.InitPostgres(),
-		mq:             rabbitmq.InitRabbitMQ(),
-		sessionManager: session.NewSessionManager(redisClient, time.Minute*30),
-		validator:      validator.New(),
+		router:            gin.Default(),
+		redisClient:       redisClient,
+		db:                sqldb.InitPostgres(),
+		mq:                rabbitmq.InitRabbitMQ(),
+		sessionManager:    session.NewSessionManager(redisClient, time.Minute*30),
+		validator:         validator.New(),
+		ConnectionManager: websocket.NewConnectionManager(redisClient),
 	}
 }
 
@@ -48,12 +50,12 @@ func (s *Server) InitServices() {
 func (s *Server) SetupRoutes() {
 	s.router.POST("/events/:event_id/seats/set-price", eventapi.SetSeatsPriceHandler(s.services.eventService, s.services.venueService, s.validator))
 	s.router.GET("/events/:event_id/tickets", ticketapi.GetTicketsHandler(s.services.ticketService, s.services.venueService, s.services.eventService, s.validator))
-	s.router.POST("/events/:event_id/tickets/reserve", ticketapi.ReserveHandler(s.services.ticketService, s.validator))
+	s.router.POST("/events/:event_id/tickets/reserve", ticketapi.ReserveHandler(s.services.ticketService, s.services.eventService, s.validator))
 	s.router.POST("/venues", venueapi.CreateVenueHandler(s.services.venueService, s.validator))
 	s.router.POST("/artists", artistapi.CreateArtistHandler(s.services.artistService, s.validator))
 	s.router.POST("/events", eventapi.CreateEventHandler(s.services.eventService, s.services.venueService, s.services.artistService, s.validator))
 	s.router.POST("/users", userapi.CreateUserHandler(s.services.userService, s.validator))
-	s.router.GET("/ws", websocketapi.WebsocketHandler()) // get notification: tickets unavailable/available, ticket reserved
+	s.router.GET("/ws", websocketapi.WebsocketHandler(s.ConnectionManager)) // get notification: tickets unavailable/available, ticket reserved
 }
 
 func (s *Server) Run(port string) error {
