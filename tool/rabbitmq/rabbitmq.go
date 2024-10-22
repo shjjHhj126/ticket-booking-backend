@@ -141,7 +141,7 @@ func (r *RabbitMQ) ConsumeMessages(action string, handler func([]byte) error) er
 		for msg := range msgs {
 			if err := handler(msg.Body); err != nil {
 				log.Printf("Failed to process message: %v", err)
-				if err := msg.Nack(false, true); err != nil { // second param in msg.Nack() means requeue
+				if err := msg.Nack(false, false); err != nil { // second param in msg.Nack() means requeue
 					log.Printf("Failed to NACK message: %v", err)
 				}
 			} else {

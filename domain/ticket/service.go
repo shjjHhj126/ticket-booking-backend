@@ -41,7 +41,7 @@ func (s *TicketService) GetTickets(ctx *gin.Context, eventID, number, lowPrice, 
 
 	err := s.redisClient.Watch(ctx, func(tx *redislib.Tx) error {
 
-		// Step 1: Check if section data is present
+		// Check if section data is present
 		sectionIDs, err := getSectionIDs(ctx.Request.Context(), tx, eventID, lowPrice, highPrice, venueService)
 		if err != nil {
 			return err
@@ -49,7 +49,7 @@ func (s *TicketService) GetTickets(ctx *gin.Context, eventID, number, lowPrice, 
 
 		count := 0
 
-		// Step 2: Fetch price blocks and seat availability for each section
+		// Fetch price blocks and seat availability for each section
 		for _, sectionID := range sectionIDs {
 
 			seatBlocks, err := getPriceBlocks(ctx, tx, eventID, sectionID, lowPrice, highPrice, venueService)
@@ -57,7 +57,7 @@ func (s *TicketService) GetTickets(ctx *gin.Context, eventID, number, lowPrice, 
 				return err
 			}
 
-			// remember:same price per priceBlock
+			// Remember : same price per priceBlock
 			for _, priceBlock := range seatBlocks {
 
 				consecutiveSeats, err := getConsecutiveSeatBlocks(ctx, tx, eventID, sectionID, venueService, &priceBlock)
@@ -141,56 +141,124 @@ func (s *TicketService) HandleBookingMessage(data []byte) error {
 		return fmt.Errorf("failed to unmarshal msg, error: %w", err)
 	}
 
-	// Read the Lua script
-	script, err := readLuaScript("reserve_seats_return_broadcast_info.lua")
-	if err != nil {
-		return err
-	}
+	// Redis keys
+	seatsKey := fmt.Sprintf("event:%d:section:%d:rows", msg.EventID, msg.SectionID)
+	priceBlocksKey := fmt.Sprintf("event:%d:section:%d:price_blocks", msg.EventID, msg.SectionID)
 
-	// Execute the Lua script
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	result, err := s.redisClient.Eval(ctx, script,
-		[]string{},
-		fmt.Sprintf("%d", msg.EventID),
-		fmt.Sprintf("%d", msg.SectionID),
-		fmt.Sprintf("%d", msg.RowID),
-		fmt.Sprintf("%d", msg.Length),
-		msg.SessionID,
-	).Result()
-	if err != nil {
-		return fmt.Errorf("failed to execute Lua script: %w", err)
-	}
+	err := s.redisClient.Watch(ctx, func(tx *redislib.Tx) error {
+		// Step 1: Fetch and decode row data
+		rowData, err := tx.HGet(ctx, seatsKey, fmt.Sprintf("%d", msg.RowID)).Result()
+		if err == redislib.Nil {
+			return fmt.Errorf("row not found")
+		} else if err != nil {
+			return fmt.Errorf("failed to get row data: %w", err)
+		}
 
-	resultMap, ok := result.(map[string]interface{})
-	if !ok {
-		return fmt.Errorf("unexpected result format from Lua script")
-	}
+		var rowInfo struct {
+			Seats string `json:"seats"`
+		}
+		if err := json.Unmarshal([]byte(rowData), &rowInfo); err != nil {
+			return fmt.Errorf("failed to decode row data: %w", err)
+		}
 
-	// Extract the reserved seats
-	reservedSeats, ok := resultMap["reserved"].(map[string]interface{})
-	if !ok {
-		return fmt.Errorf("failed to parse reserved seats")
-	}
+		seats := []rune(rowInfo.Seats) // Eg. ['0', '0', '1', '1', '1']
+		seatCount := len(seats)
+		consecutiveCount := 0
+		reservedSeats := make(map[int]bool)
 
-	// Extract max Consecutive length
-	maxConsecutive, ok := resultMap["maxConsecutive"].(map[string]interface{})
-	if !ok {
-		return fmt.Errorf("failed to parse max consecutive lengths")
-	}
+		// Find and reserve seats
+		for i := 0; i < seatCount; i++ {
+			if seats[i] == '0' { // Available
+				consecutiveCount++
+			} else {
+				consecutiveCount = 0
+			}
 
-	// Notify WebSocket client
-	if err := s.NotifyReservation(msg, reservedSeats); err != nil {
-		log.Printf("failed to notify WebSocket client: %v", err)
-	}
+			if consecutiveCount == msg.Length {
+				// Mark the seats as reserved (moving backwards)
+				for j := 0; j < msg.Length; j++ {
+					reservedSeats[i-j] = true
+					seats[i-j] = '1'
+				}
+				break
+			}
+		}
 
-	// Broadcast reservation message to all clients
-	if err := s.broadcastReservation(msg, maxConsecutive); err != nil {
-		log.Printf("failed to notify WebSocket clients: %v", err)
-	}
+		if len(reservedSeats) == 0 {
+			return fmt.Errorf("not enough consecutive seats available")
+		}
 
-	return nil
+		// Update the row data
+		rowInfo.Seats = string(seats)
+		updatedRowData, err := json.Marshal(rowInfo)
+		if err != nil {
+			return fmt.Errorf("failed to encode updated row data: %w", err)
+		}
+
+		// Todo : set the rowinfo back?
+
+		// Get max consecutive lengths for price blocks
+		priceBlocks, err := tx.ZRangeWithScores(ctx, priceBlocksKey, 0, -1).Result()
+		if err != nil {
+			return fmt.Errorf("failed to get price blocks: %w", err)
+		}
+
+		priceMaxConsecutive := map[string]int{}
+		for _, block := range priceBlocks {
+			member := block.Member.(string)
+			price := int(block.Score)
+
+			// Extract start and end seat numbers from the block key
+
+			var rowID, startSeatID, startSeatNum, endSeatID, endSeatNum int
+			_, err := fmt.Sscanf(member, "%d:%d:%d:%d:%d", &rowID, &startSeatID, &startSeatNum, &endSeatID, &endSeatNum)
+			if err != nil {
+				return fmt.Errorf("failed to parse price block: %w", err)
+			}
+
+			if rowID != msg.RowID {
+				continue
+			}
+
+			// Calculate max consecutive available seats
+			maxLength, currentLength := 0, 0
+			for i := startSeatNum; i <= endSeatNum; i++ {
+				if seats[i] == '0' {
+					currentLength++
+				} else {
+					if currentLength > maxLength {
+						maxLength = currentLength
+					}
+					currentLength = 0
+				}
+			}
+			if currentLength > maxLength {
+				maxLength = currentLength
+			}
+			priceMaxConsecutive[fmt.Sprintf("%d:%d", msg.RowID, price)] = maxLength
+		}
+
+		// Start transaction to reserve seats
+		_, err = tx.TxPipelined(ctx, func(pipe redislib.Pipeliner) error {
+			pipe.HSet(ctx, seatsKey, fmt.Sprintf("%d", msg.RowID), string(updatedRowData))
+			return nil
+		})
+
+		// Step 4: Notify WebSocket client and broadcast the reservation
+		// if err := s.NotifyReservation(msg, reservedSeats); err != nil {
+		// 	log.Printf("failed to notify WebSocket client: %v", err)
+		// }
+		// if err := s.broadcastReservation(msg, priceMaxConsecutive); err != nil {
+		// 	log.Printf("failed to broadcast reservation: %v", err)
+		// }
+
+		return err
+	}, seatsKey, priceBlocksKey)
+
+	return err
 }
 
 func (s *TicketService) NotifyReservation(msg dto.ReservationMsg, reservedSeats map[string]interface{}) error {
@@ -214,7 +282,7 @@ func (s *TicketService) NotifyReservation(msg dto.ReservationMsg, reservedSeats 
 }
 
 func (s *TicketService) broadcastReservation(msg dto.ReservationMsg, maxConsecutive map[string]interface{}) error {
-	log.Printf("maxConsecutive:", maxConsecutive)
+	log.Printf("maxConsecutive:%+v", maxConsecutive)
 
 	broadcastMsg := dto.BroadcastMsg{
 		EventID:     msg.EventID,

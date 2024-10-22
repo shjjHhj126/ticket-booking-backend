@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"os"
 	"strconv"
 	"strings"
 	"ticket-booking-backend/domain/venue"
@@ -174,6 +173,7 @@ func getConsecutiveSeats(ctx context.Context,
 	tx *redislib.Tx, eventID, sectionID int,
 	block *venue.SeatPriceBlock) ([]venue.ConsecutiveSeats, error) {
 	redisKey := fmt.Sprintf("event:%d:section:%d:rows", eventID, sectionID)
+	tx.Watch(ctx, redisKey) // if key changed, abort the transaction. Todo: what if venue info change?
 	rowID := block.RowID
 	seatsKey := fmt.Sprintf("%d", rowID) // Field name for the row in the hash
 
@@ -276,12 +276,4 @@ func cacheConsecutiveSeats(ctx context.Context,
 	log.Print("cache consecutive seat 1")
 
 	return getConsecutiveSeats(ctx, tx, eventID, sectionID, priceBlock)
-}
-
-func readLuaScript(scriptPath string) (string, error) {
-	content, err := os.ReadFile(scriptPath)
-	if err != nil {
-		return "", fmt.Errorf("failed to read Lua script: %w", err)
-	}
-	return string(content), nil
 }

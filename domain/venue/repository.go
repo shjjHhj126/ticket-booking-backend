@@ -132,6 +132,11 @@ func (repo *VenueRepository) GetSectionIds(eventID int) ([]SectionPriceRange, er
 }
 
 func (repo *VenueRepository) GetSeatPriceBlocks(eventID, sectionID int) ([]SeatPriceBlock, error) {
+	/*
+		seat_number - ROW_NUMBER():
+		constant for consecutive seats but changes when there's a gap
+	*/
+
 	query := `
 		WITH seat_info AS (
 			SELECT 
@@ -147,25 +152,26 @@ func (repo *VenueRepository) GetSeatPriceBlocks(eventID, sectionID int) ([]SeatP
 			LEFT JOIN events ON events.id = event_seat.event_id
 			WHERE sections.id = $1
 			AND events.id = $2
-		)
-		SELECT 
-			MIN(CASE WHEN seat_number = start_seat_number THEN seat_id END) AS start_seat_id,
-			MIN(seat_number) AS start_seat_number, 
-			MIN(CASE WHEN seat_number = end_seat_number THEN seat_id END) AS end_seat_id,
-			MAX(seat_number) AS end_seat_number, 
-			row_id, 
-			price
-		FROM (
+		),
+		seat_consecutive AS (
 			SELECT 
 				seat_id, 
 				seat_number, 
 				row_id, 
 				price,
-				MIN(seat_number) OVER (PARTITION BY row_id, price) AS start_seat_number,
-				MAX(seat_number) OVER (PARTITION BY row_id, price) AS end_seat_number
+				seat_number - ROW_NUMBER() OVER (PARTITION BY row_id, price ORDER BY seat_number) AS grouping_key
 			FROM seat_info
-		) AS subquery
-		GROUP BY row_id, price
+		)
+		SELECT 
+			MIN(seat_id) AS start_seat_id,
+			MIN(seat_number) AS start_seat_number, 
+			MAX(seat_id) AS end_seat_id,
+			MAX(seat_number) AS end_seat_number, 
+			row_id, 
+			price
+		FROM seat_consecutive
+		GROUP BY row_id, price, grouping_key
+		HAVING price BETWEEN 500 and 600
 		ORDER BY row_id, start_seat_number
 	`
 

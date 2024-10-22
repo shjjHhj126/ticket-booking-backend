@@ -23,8 +23,7 @@ type SetSeatsPriceDTO struct {
 	Price   int   `db:"price" json:"price" validate:"required,min=0"`
 }
 
-type ReservationDTO struct {
-	EventID   int `json:"event_id" validate:"required"`
+type ReservationDTO struct { //EventID is path variable
 	SectionID int `json:"section_id" validate:"required"`
 	RowID     int `json:"row_id" validate:"required"`
 	Price     int `json:"price" validate:"required,min=0"`
