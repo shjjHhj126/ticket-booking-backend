@@ -33,11 +33,13 @@ func NewTicketService(redisClient *redislib.Client, rmq *rabbitmq.RabbitMQ, db *
 	}
 }
 
-func (s *TicketService) GetTickets(ctx *gin.Context, eventID, number, lowPrice, highPrice, page, pageSize int, venueService *venue.VenueService, eventService *event.EventService) ([]Ticket, error) {
+func (s *TicketService) GetTickets(ctx *gin.Context,
+	eventID, number, lowPrice, highPrice, page, pageSize int,
+	venueService *venue.VenueService, eventService *event.EventService) ([]Ticket, error) {
 	offset := (page - 1) * pageSize
+	var tickets []Ticket
 
 	// Start Redis transaction by watching the key for sections in the price range
-	var tickets []Ticket
 
 	err := s.redisClient.Watch(ctx, func(tx *redislib.Tx) error {
 
@@ -47,7 +49,10 @@ func (s *TicketService) GetTickets(ctx *gin.Context, eventID, number, lowPrice, 
 			return err
 		}
 
+		fmt.Printf("sectionIDs:%+v", sectionIDs)
+
 		count := 0
+		priceInfoMap := make(map[int]priceInfo) // Initialize the map to store price info
 
 		// Fetch price blocks and seat availability for each section
 		for _, sectionID := range sectionIDs {
@@ -57,43 +62,74 @@ func (s *TicketService) GetTickets(ctx *gin.Context, eventID, number, lowPrice, 
 				return err
 			}
 
-			// Remember : same price per priceBlock
+			// Calculate max length per price
 			for _, priceBlock := range seatBlocks {
 
-				consecutiveSeats, err := getConsecutiveSeatBlocks(ctx, tx, eventID, sectionID, venueService, &priceBlock)
+				// Get the row condition of this priceBlock
+				seatStatuses, err := getConsecutiveSeatBlocks(ctx, tx, eventID, sectionID, venueService, &priceBlock)
 				if err != nil {
 					return err
 				}
 
-				log.Printf("get consecutiveSeats : %+v", consecutiveSeats)
+				seatStatusesPiece := seatStatuses[priceBlock.StartSeatNumber-1 : priceBlock.EndSeatNumber]
 
-				// Todo: cache sectionName
-				sectionName, err := venueService.GetSectionNameByID(sectionID)
-				if err != nil {
-					return nil
+				maxLen := 0
+				curLen := 0
+				for _, status := range seatStatusesPiece {
+					if status == '0' {
+						curLen += 1
+					} else {
+						if curLen > maxLen {
+							maxLen = curLen
+						}
+						curLen = 0
+					}
 				}
 
-				log.Printf("sectionName : %s\n", sectionName)
+				// Final update
+				if curLen > maxLen {
+					maxLen = curLen
+				}
 
-				for _, consecutiveSeat := range consecutiveSeats {
-					if consecutiveSeat.Length >= number {
-						if count >= offset && len(tickets) < pageSize {
-							ticket := Ticket{
-								EventID:     eventID,
-								SectionID:   sectionID,
-								SectionName: sectionName,
-								RowID:       priceBlock.RowID,
-								RowName:     consecutiveSeat.RowName,
-								Price:       priceBlock.Price,
-								Length:      consecutiveSeat.Length,
-							}
-							tickets = append(tickets, ticket)
-						}
-						count++
-						if len(tickets) == pageSize {
-							return nil
-						}
+				// Update the priceIntoMap
+				if maxLen > priceInfoMap[priceBlock.Price].Length {
+					priceInfoMap[priceBlock.Price] = priceInfo{
+						SectionID: sectionID,
+						RowID:     priceBlock.RowID,
+						Length:    maxLen,
 					}
+				}
+			}
+		}
+
+		fmt.Printf("priceInfoMap:%+v", priceInfoMap)
+
+		for price, info := range priceInfoMap {
+			if info.Length >= number {
+				if count >= offset && len(tickets) < pageSize {
+					sectionName, err := venueService.GetSectionNameByID(info.SectionID)
+					if err != nil {
+						return err
+					}
+					rowName, err := venueService.GetRowNameByID(info.RowID)
+					if err != nil {
+						return err
+					}
+
+					ticket := Ticket{
+						EventID:     eventID,
+						SectionID:   info.SectionID,
+						SectionName: sectionName,
+						RowID:       info.RowID,
+						RowName:     rowName,
+						Price:       price,
+						Length:      info.Length,
+					}
+					tickets = append(tickets, ticket)
+				}
+				count++
+				if len(tickets) == pageSize {
+					break
 				}
 			}
 		}
@@ -101,7 +137,7 @@ func (s *TicketService) GetTickets(ctx *gin.Context, eventID, number, lowPrice, 
 	})
 
 	if err != nil {
-		return nil, err
+		return []Ticket{}, err
 	}
 
 	return tickets, nil
@@ -168,6 +204,7 @@ func (s *TicketService) HandleBookingMessage(data []byte) error {
 		seatCount := len(seats)
 		consecutiveCount := 0
 		reservedSeats := make(map[int]bool)
+		startSeatNumber := 0
 
 		// Find and reserve seats
 		for i := 0; i < seatCount; i++ {
@@ -182,6 +219,9 @@ func (s *TicketService) HandleBookingMessage(data []byte) error {
 				for j := 0; j < msg.Length; j++ {
 					reservedSeats[i-j] = true
 					seats[i-j] = '1'
+					if j == msg.Length-1 {
+						startSeatNumber = i - j + 1
+					}
 				}
 				break
 			}
@@ -191,14 +231,12 @@ func (s *TicketService) HandleBookingMessage(data []byte) error {
 			return fmt.Errorf("not enough consecutive seats available")
 		}
 
-		// Update the row data
+		// calculate the new row data
 		rowInfo.Seats = string(seats)
 		updatedRowData, err := json.Marshal(rowInfo)
 		if err != nil {
 			return fmt.Errorf("failed to encode updated row data: %w", err)
 		}
-
-		// Todo : set the rowinfo back?
 
 		// Get max consecutive lengths for price blocks
 		priceBlocks, err := tx.ZRangeWithScores(ctx, priceBlocksKey, 0, -1).Result()
@@ -206,7 +244,7 @@ func (s *TicketService) HandleBookingMessage(data []byte) error {
 			return fmt.Errorf("failed to get price blocks: %w", err)
 		}
 
-		priceMaxConsecutive := map[string]int{}
+		priceMaxConsecutive := map[int]int{}
 		for _, block := range priceBlocks {
 			member := block.Member.(string)
 			price := int(block.Score)
@@ -223,10 +261,10 @@ func (s *TicketService) HandleBookingMessage(data []byte) error {
 				continue
 			}
 
-			// Calculate max consecutive available seats
+			// Calculate max consecutive available seats in this certain price block
 			maxLength, currentLength := 0, 0
 			for i := startSeatNum; i <= endSeatNum; i++ {
-				if seats[i] == '0' {
+				if seats[i-1] == '0' {
 					currentLength++
 				} else {
 					if currentLength > maxLength {
@@ -238,22 +276,29 @@ func (s *TicketService) HandleBookingMessage(data []byte) error {
 			if currentLength > maxLength {
 				maxLength = currentLength
 			}
-			priceMaxConsecutive[fmt.Sprintf("%d:%d", msg.RowID, price)] = maxLength
+			priceMaxConsecutive[price] = maxLength
 		}
 
-		// Start transaction to reserve seats
-		_, err = tx.TxPipelined(ctx, func(pipe redislib.Pipeliner) error {
-			pipe.HSet(ctx, seatsKey, fmt.Sprintf("%d", msg.RowID), string(updatedRowData))
-			return nil
-		})
+		// Update data to redis : do this in the end to handle checks and preparations before
+		_, err = tx.HSet(ctx, seatsKey, fmt.Sprintf("%d", msg.RowID), string(updatedRowData)).Result()
+		if err != nil {
+			return fmt.Errorf("failed to update seats data: %w", err)
+		}
 
-		// Step 4: Notify WebSocket client and broadcast the reservation
-		// if err := s.NotifyReservation(msg, reservedSeats); err != nil {
-		// 	log.Printf("failed to notify WebSocket client: %v", err)
-		// }
-		// if err := s.broadcastReservation(msg, priceMaxConsecutive); err != nil {
-		// 	log.Printf("failed to broadcast reservation: %v", err)
-		// }
+		// Add reservation in redis
+		err = setReservation(ctx, tx, msg.SessionID, msg.EventID, msg.SectionID, msg.RowID, startSeatNumber, msg.Length)
+		if err != nil {
+			return err
+		}
+
+		// Notify WebSocket client and broadcast the reservation
+		if err := s.NotifyReservation(msg); err != nil {
+			log.Printf("failed to notify WebSocket client: %v", err)
+		}
+
+		if err := s.broadcastReservation(msg, priceMaxConsecutive); err != nil {
+			log.Printf("failed to broadcast reservation: %v", err)
+		}
 
 		return err
 	}, seatsKey, priceBlocksKey)
@@ -261,9 +306,7 @@ func (s *TicketService) HandleBookingMessage(data []byte) error {
 	return err
 }
 
-func (s *TicketService) NotifyReservation(msg dto.ReservationMsg, reservedSeats map[string]interface{}) error {
-	log.Printf("reservedSeats:%+v", reservedSeats)
-
+func (s *TicketService) NotifyReservation(msg dto.ReservationMsg) error {
 	reservationMsg := dto.ReservationMsg{
 		EventID:   msg.EventID,
 		SectionID: msg.SectionID,
@@ -281,19 +324,20 @@ func (s *TicketService) NotifyReservation(msg dto.ReservationMsg, reservedSeats 
 	return s.connectionManager.NotifyReservation(data)
 }
 
-func (s *TicketService) broadcastReservation(msg dto.ReservationMsg, maxConsecutive map[string]interface{}) error {
-	log.Printf("maxConsecutive:%+v", maxConsecutive)
-
-	broadcastMsg := dto.BroadcastMsg{
-		EventID:     msg.EventID,
-		SectionID:   msg.SectionID,
-		RowID:       msg.RowID,
-		Price:       msg.Price,
-		MaxLength:   0,
-		IsAvailable: false,
+func (s *TicketService) broadcastReservation(msg dto.ReservationMsg, priceMaxConsecutive map[int]int) error {
+	var broadcastMsgs dto.BroadcastMsgs
+	for price, length := range priceMaxConsecutive {
+		broadcastMsg := dto.BroadcastMsg{
+			EventID:   msg.EventID,
+			SectionID: msg.SectionID,
+			RowID:     msg.RowID,
+			Price:     price,
+			MaxLength: length,
+		}
+		broadcastMsgs.Messages = append(broadcastMsgs.Messages, broadcastMsg)
 	}
 
-	data, err := json.Marshal(broadcastMsg)
+	data, err := json.Marshal(broadcastMsgs)
 	if err != nil {
 		return fmt.Errorf("error marshaling broadcast message: %w", err)
 	}

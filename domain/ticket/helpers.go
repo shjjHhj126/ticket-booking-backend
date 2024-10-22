@@ -2,7 +2,9 @@ package ticket
 
 import (
 	"context"
+	"fmt"
 	"ticket-booking-backend/domain/venue"
+	"time"
 
 	redislib "github.com/redis/go-redis/v9"
 )
@@ -40,17 +42,34 @@ func getPriceBlocks(ctx context.Context, tx *redislib.Tx, eventID, sectionID, lo
 	return seatBlocks, nil
 }
 
-func getConsecutiveSeatBlocks(ctx context.Context, tx *redislib.Tx, eventID, sectionID int, venueService *venue.VenueService, priceBlock *venue.SeatPriceBlock) ([]venue.ConsecutiveSeats, error) {
+func getConsecutiveSeatBlocks(ctx context.Context, tx *redislib.Tx, eventID, sectionID int, venueService *venue.VenueService, priceBlock *venue.SeatPriceBlock) (string, error) {
 	consecutiveSeats, err := getConsecutiveSeats(ctx, tx, eventID, sectionID, priceBlock)
 	if err != nil {
-		return []venue.ConsecutiveSeats{}, err
+		return "", err
 	}
 
 	if len(consecutiveSeats) == 0 {
 		consecutiveSeats, err = cacheConsecutiveSeats(ctx, tx, eventID, sectionID, priceBlock.RowID, priceBlock, venueService)
 		if err != nil {
-			return []venue.ConsecutiveSeats{}, err
+			return "", err
 		}
 	}
 	return consecutiveSeats, nil
+}
+
+func setReservation(ctx context.Context, tx *redislib.Tx, sessionID string, eventID, sectionID, rowID, startSeatNumber, length int) error {
+	reservationKey := fmt.Sprintf("session:%s:reservations", sessionID)
+	fieldKey := fmt.Sprintf("%d:%d:%d:%d:%d", eventID, sectionID, rowID, startSeatNumber, length)
+
+	// Set the reservation
+	if err := tx.HSet(ctx, reservationKey, fieldKey, "reserved").Err(); err != nil {
+		return fmt.Errorf("failed to set reservation: %w", err)
+	}
+
+	// Set expiration
+	if err := tx.Expire(ctx, reservationKey, 5*time.Minute).Err(); err != nil {
+		return fmt.Errorf("failed to set expiration: %w", err)
+	}
+
+	return nil
 }

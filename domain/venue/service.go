@@ -36,6 +36,10 @@ func (s *VenueService) GetSectionNameByID(id int) (string, error) {
 	return s.repo.GetSectionNameByID(id)
 }
 
+func (s *VenueService) GetRowNameByID(id int) (string, error) {
+	return s.repo.GetRowNameByID(id)
+}
+
 func (s *VenueService) GetRowConditionByID(rowID, eventID int) (RowCondition, error) {
 	return s.repo.GetRowConditionByID(rowID, eventID)
 }

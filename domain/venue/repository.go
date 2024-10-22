@@ -161,17 +161,24 @@ func (repo *VenueRepository) GetSeatPriceBlocks(eventID, sectionID int) ([]SeatP
 				price,
 				seat_number - ROW_NUMBER() OVER (PARTITION BY row_id, price ORDER BY seat_number) AS grouping_key
 			FROM seat_info
+		),
+		aggregated_seats AS (
+			SELECT 
+				row_id,
+				price,
+				ARRAY_AGG(seat_id) AS seat_ids,
+				ARRAY_AGG(seat_number) AS seat_numbers
+			FROM seat_consecutive
+			GROUP BY row_id, price, grouping_key
 		)
 		SELECT 
-			MIN(seat_id) AS start_seat_id,
-			MIN(seat_number) AS start_seat_number, 
-			MAX(seat_id) AS end_seat_id,
-			MAX(seat_number) AS end_seat_number, 
+			seat_ids[1] AS start_seat_id,                -- First seat ID
+			seat_numbers[1] AS start_seat_number,        -- First seat number
+			seat_ids[array_length(seat_ids, 1)] AS end_seat_id,  -- Last seat ID
+			seat_numbers[array_length(seat_numbers, 1)] AS end_seat_number,  -- Last seat number
 			row_id, 
 			price
-		FROM seat_consecutive
-		GROUP BY row_id, price, grouping_key
-		HAVING price BETWEEN 500 and 600
+		FROM aggregated_seats
 		ORDER BY row_id, start_seat_number
 	`
 
@@ -184,6 +191,7 @@ func (repo *VenueRepository) GetSeatPriceBlocks(eventID, sectionID int) ([]SeatP
 	seatPriceBlocks := []SeatPriceBlock{}
 	for rows.Next() {
 		var seatPriceBlock SeatPriceBlock
+
 		if err := rows.Scan(
 			&seatPriceBlock.StartSeatID,
 			&seatPriceBlock.StartSeatNumber,
@@ -193,6 +201,7 @@ func (repo *VenueRepository) GetSeatPriceBlocks(eventID, sectionID int) ([]SeatP
 			&seatPriceBlock.Price); err != nil {
 			return nil, fmt.Errorf("failed to scan row: %w", err)
 		}
+
 		seatPriceBlocks = append(seatPriceBlocks, seatPriceBlock)
 	}
 
@@ -206,6 +215,18 @@ func (repo *VenueRepository) GetSectionNameByID(id int) (string, error) {
 	err := repo.db.QueryRow(query, id).Scan(&name)
 	if err != nil {
 		return "", fmt.Errorf("failed to query section name with id = %d : %w", id, err)
+	}
+
+	return name, nil
+}
+
+func (repo *VenueRepository) GetRowNameByID(id int) (string, error) {
+	query := `SELECT name FROM rows WHERE rows.id = $1`
+
+	var name string
+	err := repo.db.QueryRow(query, id).Scan(&name)
+	if err != nil {
+		return "", fmt.Errorf("failed to query row name with id = %d : %w", id, err)
 	}
 
 	return name, nil

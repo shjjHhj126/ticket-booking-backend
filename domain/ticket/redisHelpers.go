@@ -25,8 +25,6 @@ func getSectionsByPriceRange(ctx context.Context, tx *redislib.Tx, eventID, lowP
 		return nil, fmt.Errorf("failed to get sections by price range: %w", err)
 	}
 
-	log.Printf("getSectionsByPriceRange, sectionData : %+v", sectionData)
-
 	var sectionIDs []int
 	for _, z := range sectionData {
 		sectionInfo := strings.Split(z.Member.(string), ":")
@@ -97,8 +95,6 @@ func getSeatPriceBlocks(ctx context.Context, tx *redislib.Tx, eventID, sectionID
 	if err != nil {
 		return nil, fmt.Errorf("failed to get seat price blocks from cache: %w", err)
 	}
-
-	log.Printf("priceBlockData:%+v", priceBlockData)
 
 	var seatPriceBlocks []venue.SeatPriceBlock
 	for _, z := range priceBlockData {
@@ -171,7 +167,7 @@ func cacheSeatPriceBlocks(ctx context.Context, tx *redislib.Tx, eventID, section
 
 func getConsecutiveSeats(ctx context.Context,
 	tx *redislib.Tx, eventID, sectionID int,
-	block *venue.SeatPriceBlock) ([]venue.ConsecutiveSeats, error) {
+	block *venue.SeatPriceBlock) (string, error) {
 	redisKey := fmt.Sprintf("event:%d:section:%d:rows", eventID, sectionID)
 	tx.Watch(ctx, redisKey) // if key changed, abort the transaction. Todo: what if venue info change?
 	rowID := block.RowID
@@ -181,72 +177,31 @@ func getConsecutiveSeats(ctx context.Context,
 	seatsData, err := tx.HGet(ctx, redisKey, seatsKey).Result()
 	if err != nil {
 		if err == redislib.Nil { // not found
-			return []venue.ConsecutiveSeats{}, nil
+			return "", nil
 		}
-		return nil, fmt.Errorf("error retrieving data from Redis: %w", err)
+		return "", fmt.Errorf("error retrieving data from Redis: %w", err)
 	}
 
 	var seats map[string]interface{}
 	if err := json.Unmarshal([]byte(seatsData), &seats); err != nil {
-		return nil, fmt.Errorf("error unmarshaling seats data: %w", err)
+		return "", fmt.Errorf("error unmarshaling seats data: %w", err)
 	}
 
 	seatStatuses, ok := seats["seats"].(string)
 	if !ok {
-		return nil, fmt.Errorf("error: seats data is not a string")
-	}
-	var consecutiveSeats []venue.ConsecutiveSeats
-
-	// Split the seats string into a slice of strings
-	availabilityList := strings.Split(seatStatuses, "")
-
-	startSeat := -1
-	count := 0
-	for seatIndex, availability := range availabilityList {
-		status, err := strconv.Atoi(availability)
-		if err != nil {
-			return nil, fmt.Errorf("error converting seat status to int: %w", err)
-		}
-
-		if status == 0 { // Seat is available
-			if startSeat == -1 {
-				startSeat = seatIndex // Mark the start of a new sequence
-			}
-			count++
-		} else { // Seat is unavailable
-			if startSeat != -1 {
-				// Save current result
-				consecutiveSeats = append(consecutiveSeats, venue.ConsecutiveSeats{
-					RowID:   rowID,
-					RowName: seats["row_name"].(string),
-					Length:  count,
-				})
-				// reset
-				startSeat = -1
-				count = 0
-			}
-		}
+		return "", fmt.Errorf("error: seats data is not a string")
 	}
 
-	// Handle the last result
-	if startSeat != -1 {
-		consecutiveSeats = append(consecutiveSeats, venue.ConsecutiveSeats{
-			RowID:   rowID,
-			RowName: seats["row_name"].(string),
-			Length:  count,
-		})
-	}
-
-	return consecutiveSeats, nil
+	return seatStatuses, nil
 }
 
 func cacheConsecutiveSeats(ctx context.Context,
 	tx *redislib.Tx, eventID, sectionID, rowID int,
 	priceBlock *venue.SeatPriceBlock,
-	venueService *venue.VenueService) ([]venue.ConsecutiveSeats, error) {
+	venueService *venue.VenueService) (string, error) {
 	rowCondition, err := venueService.GetRowConditionByID(rowID, eventID)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 
 	redisKey := fmt.Sprintf("event:%d:section:%d:rows", eventID, sectionID)
@@ -270,7 +225,7 @@ func cacheConsecutiveSeats(ctx context.Context,
 	// Cache the row's seat availability in Redis
 	err = tx.HSet(ctx, redisKey, rowID, rowData).Err()
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 
 	log.Print("cache consecutive seat 1")

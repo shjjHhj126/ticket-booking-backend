@@ -61,13 +61,16 @@ type ReservationMsg struct {
 	SessionID string `json:"session_id"` //track user
 }
 
+type BroadcastMsgs struct {
+	Messages []BroadcastMsg `json:"messages"`
+}
+
 type BroadcastMsg struct {
-	EventID     int  `json:"event_id"`
-	SectionID   int  `json:"section_id"`
-	RowID       int  `json:"row_id"`
-	Price       int  `json:"price"`
-	MaxLength   int  `json:"max_length"`
-	IsAvailable bool `json:"is_available"`
+	EventID   int `json:"event_id"`
+	SectionID int `json:"section_id"`
+	RowID     int `json:"row_id"`
+	Price     int `json:"price"`
+	MaxLength int `json:"max_length"`
 }
 
 type NotificationMsg struct {

@@ -9,3 +9,9 @@ type Ticket struct {
 	Price       int    `json:"price"`
 	Length      int    `json:"length"`
 }
+
+type priceInfo struct {
+	SectionID int
+	RowID     int
+	Length    int
+}

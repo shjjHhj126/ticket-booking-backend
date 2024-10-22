@@ -70,6 +70,7 @@ func GetTicketsHandler(ticketService *ticket.TicketService,
 			return
 		}
 		log.Printf("Retrieved Tickets: %+v\n", tickets)
+		ctx.JSON(http.StatusAccepted, tickets)
 	}
 }
 
