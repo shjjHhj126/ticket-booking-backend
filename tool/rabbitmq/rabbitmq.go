@@ -11,17 +11,19 @@ import (
 )
 
 type RabbitMQ struct {
-	conn           *amqp.Connection //TCP connection
-	bookingChannel *amqp.Channel    //virtual connection, used to send and receive messages.
-	paymentChannel *amqp.Channel
+	conn              *amqp.Connection //TCP connection
+	bookingChannel    *amqp.Channel    //virtual connection, used to send and receive messages.
+	paymentChannel    *amqp.Channel    // update db
+	expirationChannel *amqp.Channel    // listen to redis reservations' expiration and handle it
 }
 
 // queues are buffers "inside" channel
 
 var (
-	defaultRabbitMQURL      = os.Getenv("RABBIT_MQ_URL")
-	defaultBookingQueueName = os.Getenv("BOOKING_QUEUE_NAME")
-	defaultPaymentQueueName = os.Getenv("PAYMENT_QUEUE_NAME")
+	defaultRabbitMQURL         = os.Getenv("RABBIT_MQ_URL")
+	defaultBookingQueueName    = "booking-queue"
+	defaultPaymentQueueName    = "payment-queue" //update db
+	defaultExpirationQueueName = "expiration-queue"
 )
 
 func InitRabbitMQ() *RabbitMQ {
@@ -35,6 +37,7 @@ func InitRabbitMQ() *RabbitMQ {
 	// Initialize channels and declare queues
 	bookingChannel := createChannel(conn, "booking")
 	paymentChannel := createChannel(conn, "payment")
+	expirationChannel := createChannel(conn, "expiration")
 
 	// Declare queues
 	bookingQueueName := util.GetEnvOrDefault("BOOKING_QUEUE_NAME", defaultBookingQueueName)
@@ -43,10 +46,14 @@ func InitRabbitMQ() *RabbitMQ {
 	paymentQueueName := util.GetEnvOrDefault("PAYMENT_QUEUE_NAME", defaultPaymentQueueName)
 	declareQueue(paymentChannel, paymentQueueName)
 
+	expirationQueueName := util.GetEnvOrDefault("EXPIRATION_QUEUE_NAME", defaultExpirationQueueName)
+	declareQueue(expirationChannel, expirationQueueName)
+
 	return &RabbitMQ{
-		conn:           conn,
-		bookingChannel: bookingChannel,
-		paymentChannel: paymentChannel,
+		conn:              conn,
+		bookingChannel:    bookingChannel,
+		paymentChannel:    paymentChannel,
+		expirationChannel: expirationChannel,
 	}
 }
 
@@ -58,6 +65,11 @@ func (r *RabbitMQ) Close() error {
 	}
 	if r.paymentChannel != nil {
 		if err := r.paymentChannel.Close(); err != nil {
+			return err
+		}
+	}
+	if r.expirationChannel != nil {
+		if err := r.expirationChannel.Close(); err != nil {
 			return err
 		}
 	}
@@ -83,6 +95,10 @@ func (r *RabbitMQ) PublishMessage(action string, body []byte) error {
 	case "pay":
 		channel = r.paymentChannel
 		queueName = "payment-queue"
+	case "expire":
+		channel = r.expirationChannel
+		queueName = "expiration-queue"
+
 	default:
 		log.Printf(`Unknown action : %s, should be either "book" or "pay" `, action)
 		return fmt.Errorf("unknown action name in publish message : %s", action)
@@ -94,8 +110,9 @@ func (r *RabbitMQ) PublishMessage(action string, body []byte) error {
 		false,     // mandatory
 		false,     // immediate
 		amqp.Publishing{
-			ContentType: "application/json",
-			Body:        body,
+			DeliveryMode: amqp.Persistent, // store on disk, retrieve
+			ContentType:  "application/json",
+			Body:         body,
 		},
 	)
 
@@ -118,7 +135,9 @@ func (r *RabbitMQ) ConsumeMessages(action string, handler func([]byte) error) er
 	case "pay":
 		channel = r.paymentChannel
 		queueName = "payment-queue"
-
+	case "expire":
+		channel = r.expirationChannel
+		queueName = "expiration-queue"
 	default:
 		log.Printf(`Unknown action : %s, should be either "book" or "pay" `, action)
 		return fmt.Errorf("unknown action name in publish message : %s", action)

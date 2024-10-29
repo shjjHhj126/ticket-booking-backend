@@ -3,6 +3,7 @@ package ticket
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"ticket-booking-backend/domain/venue"
 	"time"
 
@@ -42,34 +43,57 @@ func getPriceBlocks(ctx context.Context, tx *redislib.Tx, eventID, sectionID, lo
 	return seatBlocks, nil
 }
 
-func getConsecutiveSeatBlocks(ctx context.Context, tx *redislib.Tx, eventID, sectionID int, venueService *venue.VenueService, priceBlock *venue.SeatPriceBlock) (string, error) {
-	consecutiveSeats, err := getConsecutiveSeats(ctx, tx, eventID, sectionID, priceBlock)
+func getConsecutiveSeatBlocks(ctx context.Context, tx *redislib.Tx, eventID, sectionID int, venueService *venue.VenueService, priceBlock *venue.SeatPriceBlock) (string, string, error) {
+	consecutiveSeats, rowName, err := getConsecutiveSeats(ctx, tx, eventID, sectionID, priceBlock.RowID)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	if len(consecutiveSeats) == 0 {
-		consecutiveSeats, err = cacheConsecutiveSeats(ctx, tx, eventID, sectionID, priceBlock.RowID, priceBlock, venueService)
+		consecutiveSeats, rowName, err = cacheConsecutiveSeats(ctx, tx, eventID, sectionID, priceBlock.RowID, priceBlock, venueService)
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 	}
-	return consecutiveSeats, nil
+	return consecutiveSeats, rowName, nil
 }
 
-func setReservation(ctx context.Context, tx *redislib.Tx, sessionID string, eventID, sectionID, rowID, startSeatNumber, length int) error {
-	reservationKey := fmt.Sprintf("session:%s:reservations", sessionID)
-	fieldKey := fmt.Sprintf("%d:%d:%d:%d:%d", eventID, sectionID, rowID, startSeatNumber, length)
+func setReservation(ctx context.Context, tx *redislib.Tx, sessionID string, eventID, sectionID, rowID, startSeatNumber, length, price int, reservationID string) error {
+	key := fmt.Sprintf("reservation:%s", reservationID)
+	value := fmt.Sprintf("%s:%d:%d:%d:%d:%d:%d", sessionID, eventID, sectionID, rowID, startSeatNumber, length, price)
 
-	// Set the reservation
-	if err := tx.HSet(ctx, reservationKey, fieldKey, "reserved").Err(); err != nil {
+	// Set the reservation with 5 minutes time out
+	if err := tx.Set(ctx, key, value, 5*time.Minute).Err(); err != nil {
 		return fmt.Errorf("failed to set reservation: %w", err)
 	}
 
-	// Set expiration
-	if err := tx.Expire(ctx, reservationKey, 5*time.Minute).Err(); err != nil {
-		return fmt.Errorf("failed to set expiration: %w", err)
-	}
-
 	return nil
+}
+
+func ConvertReservationRecordAtoi(eventIDStr, sectionIDStr, rowIDStr, startSeatNumberStr, lengthStr, priceStr string) (int, int, int, int, int, int, error) {
+	eventID, err := strconv.Atoi(eventIDStr)
+	if err != nil {
+		return 0, 0, 0, 0, 0, 0, fmt.Errorf("invalid eventID form in redis, error:%w", err)
+	}
+	sectionID, err := strconv.Atoi(sectionIDStr)
+	if err != nil {
+		return 0, 0, 0, 0, 0, 0, fmt.Errorf("invalid sectionID form in redis, error:%w", err)
+	}
+	rowID, err := strconv.Atoi(rowIDStr)
+	if err != nil {
+		return 0, 0, 0, 0, 0, 0, fmt.Errorf("invalid rowID form in redis, error:%w", err)
+	}
+	startSeatNumber, err := strconv.Atoi(startSeatNumberStr)
+	if err != nil {
+		return 0, 0, 0, 0, 0, 0, fmt.Errorf("invalid startSeatNumber form in redis, error:%w", err)
+	}
+	Length, err := strconv.Atoi(lengthStr)
+	if err != nil {
+		return 0, 0, 0, 0, 0, 0, fmt.Errorf("invalid length form in redis, error:%w", err)
+	}
+	Price, err := strconv.Atoi(priceStr)
+	if err != nil {
+		return 0, 0, 0, 0, 0, 0, fmt.Errorf("invalid price form in redis, error:%w", err)
+	}
+	return eventID, sectionID, rowID, startSeatNumber, Length, Price, nil
 }

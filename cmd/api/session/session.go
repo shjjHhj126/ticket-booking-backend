@@ -7,19 +7,19 @@ import (
 )
 
 type SessionManager struct {
-	redisClient *redislib.Client
-	sessionTTL  time.Duration
+	RedisClient *redislib.Client
+	SessionTTL  time.Duration
 }
 
 func NewSessionManager(redisClient *redislib.Client, sessionTTL time.Duration) *SessionManager {
 	return &SessionManager{
-		redisClient: redisClient,
-		sessionTTL:  sessionTTL,
+		RedisClient: redisClient,
+		SessionTTL:  sessionTTL,
 	}
 }
 
 func (s *SessionManager) Close() error {
-	if err := s.redisClient.Close(); err != nil {
+	if err := s.RedisClient.Close(); err != nil {
 		return err
 	}
 	return nil

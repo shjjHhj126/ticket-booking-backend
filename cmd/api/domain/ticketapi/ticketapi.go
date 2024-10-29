@@ -1,6 +1,7 @@
 package ticketapi
 
 import (
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -14,10 +15,11 @@ import (
 )
 
 // use form instead of json
+// validate : required means 0 is invalid
 type TicketQuery struct {
 	Number    int `form:"number" validate:"required,min=1,max=6"`
-	LowPrice  int `form:"low_price" validate:"required,min=0"`
-	HighPrice int `form:"high_price" validate:"required,min=0,gtfield=LowPrice"`
+	LowPrice  int `form:"low_price" validate:"min=0"`
+	HighPrice int `form:"high_price" validate:"min=0,gtfield=LowPrice"`
 	Page      int `form:"page" validate:"required,min=1"`
 	PageSize  int `form:"page_size" validate:"required,min=1,max=100"`
 }
@@ -57,7 +59,9 @@ func GetTicketsHandler(ticketService *ticket.TicketService,
 		log.Printf("got query:%+v\n", query)
 
 		if err := validator.Struct(query); err != nil {
-			ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			log.Printf("Validation failed: %v\n", err)
+			log.Printf("Raw query: %v\n", ctx.Request.URL.Query())
+			ctx.JSON(http.StatusBadRequest, gin.H{"wrong query content. error": err.Error()})
 			return
 		}
 
@@ -106,11 +110,44 @@ func ReserveHandler(ticketService *ticket.TicketService, eventService *event.Eve
 			return
 		}
 
-		if err := ticketService.ReserveTicket(ctx, eventID, reqDTO.SectionID, reqDTO.RowID, reqDTO.Price, reqDTO.Length); err != nil {
+		if err := ticketService.ReserveTicket(ctx, eventID, reqDTO.SectionID, reqDTO.RowID, reqDTO.Price, reqDTO.Length, reqDTO.ReservationID); err != nil {
 			ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
 
 		ctx.JSON(http.StatusOK, gin.H{"message": "Reservation request received"})
+	}
+}
+
+// after payment success, notify the backend
+func BookedHandler(ticketService *ticket.TicketService, eventService *event.EventService, validator *validator.Validate) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		// verify event exist
+		eventIDStr := ctx.Param("event_id")
+		eventID, err := strconv.Atoi(eventIDStr) // Convert event_id to int
+		if err != nil {
+			ctx.JSON(http.StatusBadRequest, gin.H{"error": "invalid event ID"})
+			return
+		}
+		existEvent, err := eventService.Exist(eventID)
+		if err != nil {
+			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "failed to check event existence: " + err.Error()})
+			return
+		}
+		if !existEvent {
+			ctx.JSON(http.StatusBadRequest, gin.H{"error": "event does not exist"})
+			return
+		}
+
+		log.Println("event exists")
+
+		reservationID := ctx.Param("reservation_id")
+
+		if err := ticketService.BookedTicket(ctx, reservationID); err != nil {
+			ctx.JSON(http.StatusInternalServerError, gin.H{"message": "Something went wrong"})
+			fmt.Printf("service booked ticket:%s", err.Error())
+			return
+		}
+		ctx.JSON(http.StatusAccepted, gin.H{"message": "Payment success info request received"})
 	}
 }

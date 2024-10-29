@@ -25,3 +25,17 @@ func (repo *UserRepository) Create(user *User) error {
 
 	return nil
 }
+
+func (repo *UserRepository) GetUserByEmail(email string) (User, error) {
+	query := `
+		SELECT id, username, password_hash, email
+		FROM users
+		WHERE email = $1
+	`
+	user := User{}
+	err := repo.db.QueryRow(query, email).Scan(&user.ID, &user.Username, &user.HashedPassword, &user.Email)
+	if err != nil {
+		return user, err
+	}
+	return user, nil
+}

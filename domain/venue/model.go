@@ -50,9 +50,3 @@ type SeatCondition struct {
 	SeatNumber int  `db:"seat_number"`
 	BookedBy   *int `db:"booked_by"`
 }
-
-// type ConsecutiveSeats struct {
-// 	RowID   int    `db:"row_id"`
-// 	RowName string `db:"row_name"`
-// 	Length  int    `db:"length"`
-// }

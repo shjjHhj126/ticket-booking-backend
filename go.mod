@@ -3,6 +3,7 @@ module ticket-booking-backend
 go 1.23.2
 
 require (
+	github.com/gin-contrib/cors v1.7.2
 	github.com/gin-gonic/gin v1.10.0
 	github.com/go-playground/validator v9.31.0+incompatible
 	github.com/go-playground/validator/v10 v10.22.1
@@ -13,6 +14,7 @@ require (
 	github.com/lib/pq v1.10.9
 	github.com/rabbitmq/amqp091-go v1.10.0
 	github.com/redis/go-redis/v9 v9.6.1
+	github.com/stripe/stripe-go/v80 v80.2.0
 	golang.org/x/crypto v0.27.0
 )
 

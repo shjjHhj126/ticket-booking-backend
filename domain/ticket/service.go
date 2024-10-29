@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strconv"
+	"strings"
 	"ticket-booking-backend/cmd/api/websocket"
 	"ticket-booking-backend/domain/event"
+	"ticket-booking-backend/domain/payment"
 	"ticket-booking-backend/domain/venue"
 	"ticket-booking-backend/dto"
 	"ticket-booking-backend/tool/rabbitmq"
@@ -18,18 +21,31 @@ import (
 	redislib "github.com/redis/go-redis/v9"
 )
 
+type ReservationMsg struct {
+	EventID       int    `json:"event_id"`
+	SectionID     int    `json:"section_id"`
+	RowID         int    `json:"row_id"`
+	Price         int    `json:"price"`
+	Length        int    `json:"length"`
+	SessionID     string `json:"session_id"`     //track user
+	ReservationID string `json:"reservation_id"` // track reservation(and link to stripe client secret in redis reservation record)
+}
+
 type TicketService struct {
 	mq                *rabbitmq.RabbitMQ
 	redisClient       *redislib.Client
 	db                *sql.DB
 	connectionManager *websocket.ConnectionManager
+	paymentService    *payment.PaymentService
 }
 
-func NewTicketService(redisClient *redislib.Client, rmq *rabbitmq.RabbitMQ, db *sql.DB) *TicketService {
+func NewTicketService(redisClient *redislib.Client, rmq *rabbitmq.RabbitMQ, db *sql.DB, cm *websocket.ConnectionManager, paymentService *payment.PaymentService) *TicketService {
 	return &TicketService{
-		mq:          rmq,
-		redisClient: redisClient,
-		db:          db,
+		mq:                rmq,
+		redisClient:       redisClient,
+		db:                db,
+		connectionManager: cm,
+		paymentService:    paymentService,
 	}
 }
 
@@ -66,7 +82,7 @@ func (s *TicketService) GetTickets(ctx *gin.Context,
 			for _, priceBlock := range seatBlocks {
 
 				// Get the row condition of this priceBlock
-				seatStatuses, err := getConsecutiveSeatBlocks(ctx, tx, eventID, sectionID, venueService, &priceBlock)
+				seatStatuses, rowName, err := getConsecutiveSeatBlocks(ctx, tx, eventID, sectionID, venueService, &priceBlock)
 				if err != nil {
 					return err
 				}
@@ -96,6 +112,7 @@ func (s *TicketService) GetTickets(ctx *gin.Context,
 					priceInfoMap[priceBlock.Price] = priceInfo{
 						SectionID: sectionID,
 						RowID:     priceBlock.RowID,
+						RowName:   rowName,
 						Length:    maxLen,
 					}
 				}
@@ -111,17 +128,13 @@ func (s *TicketService) GetTickets(ctx *gin.Context,
 					if err != nil {
 						return err
 					}
-					rowName, err := venueService.GetRowNameByID(info.RowID)
-					if err != nil {
-						return err
-					}
 
 					ticket := Ticket{
 						EventID:     eventID,
 						SectionID:   info.SectionID,
 						SectionName: sectionName,
 						RowID:       info.RowID,
-						RowName:     rowName,
+						RowName:     info.RowName,
 						Price:       price,
 						Length:      info.Length,
 					}
@@ -143,19 +156,20 @@ func (s *TicketService) GetTickets(ctx *gin.Context,
 	return tickets, nil
 }
 
-func (s *TicketService) ReserveTicket(ctx *gin.Context, eventID, sectionID, rowID, price, length int) error {
+func (s *TicketService) ReserveTicket(ctx *gin.Context, eventID, sectionID, rowID, price, length int, reservationID string) error {
 	sessionID, exists := ctx.Get("session_id")
 	if !exists {
 		return fmt.Errorf("session ID not found in context")
 	}
 
-	msg := dto.ReservationMsg{
-		EventID:   eventID,
-		SectionID: sectionID,
-		RowID:     rowID,
-		Price:     price,
-		Length:    length,
-		SessionID: sessionID.(string),
+	msg := ReservationMsg{
+		EventID:       eventID,
+		SectionID:     sectionID,
+		RowID:         rowID,
+		Price:         price,
+		Length:        length,
+		SessionID:     sessionID.(string),
+		ReservationID: reservationID,
 	}
 
 	msgBytes, err := json.Marshal(msg)
@@ -171,9 +185,84 @@ func (s *TicketService) ReserveTicket(ctx *gin.Context, eventID, sectionID, rowI
 	return nil
 }
 
-func (s *TicketService) HandleBookingMessage(data []byte) error {
-	var msg dto.ReservationMsg
+func (s *TicketService) BookedTicket(ctx *gin.Context, reservationID string) error {
+	sessionID, exists := ctx.Get("session_id")
+	if !exists {
+		return fmt.Errorf("session ID not found in context")
+	}
+
+	ticketInfo, err := s.redisClient.Get(ctx, "reservation:"+reservationID).Result()
+	if err != nil {
+		if err == redislib.Nil {
+			return fmt.Errorf("reservation not found")
+		}
+		return fmt.Errorf("failed to get reservation: %w", err)
+	}
+
+	// {paymentintent_id}:{client_secret}:{session_id}:{event_id}:{section_id}:{row_id}:{start_seat_number}:{length}:{price}
+	ticketInfoArr := strings.Split(ticketInfo, ":")
+	if len(ticketInfoArr) != 9 {
+		return fmt.Errorf("invalid reservation data format")
+	}
+	paymentintentID := ticketInfoArr[0]
+	eventID, sectionID, rowID, startSeatNum, length, price, err := ConvertReservationRecordAtoi(ticketInfoArr[3], ticketInfoArr[4], ticketInfoArr[5], ticketInfoArr[6], ticketInfoArr[7], ticketInfoArr[8])
+	if err != nil {
+		return fmt.Errorf("internal Server Error:%w", err)
+	}
+
+	// get user id from redis authorized
+	userIDStr, err := s.redisClient.Get(ctx, "session:"+sessionID.(string)).Result()
+	if err != nil {
+		if err == redislib.Nil {
+			// Handle case where session is not found
+			return fmt.Errorf("no active session found")
+		}
+		return fmt.Errorf("failed to get user ID from session: %w", err)
+	}
+
+	parts := strings.Split(userIDStr, ":")
+	if len(parts) != 2 || parts[0] != "authorized" {
+		return fmt.Errorf("invalid session data format")
+	}
+
+	// Convert the user ID string to an integer
+	userID, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return fmt.Errorf("failed to convert user ID to integer: %w", err)
+	}
+
+	// Make sure intent is paid
+	status, err := s.paymentService.GetPaymentIntentStatus(paymentintentID)
+	if err != nil {
+		return fmt.Errorf("failed to get payment intent id:%s, error:%w", paymentintentID, err)
+	}
+	if curStatus := s.paymentService.PaymentIntentIsSucceeded(status); !curStatus {
+		return fmt.Errorf("payment intent status is not succeeded, error:%w", err)
+	}
+
+	data := dto.DbBookDTO{
+		EventID:         eventID,
+		SectionID:       sectionID,
+		RowID:           rowID,
+		StartSeatNumber: startSeatNum,
+		Length:          length,
+		Price:           price,
+		UserID:          userID,
+		ReservationID:   reservationID,
+	}
+	dataByte, err := json.Marshal(data)
+	if err != nil {
+		return fmt.Errorf("internal Server Error:%w", err)
+	}
+	s.mq.PublishMessage("pay", dataByte)
+
+	return nil
+}
+
+func (s *TicketService) HandleReservationMessage(data []byte) error {
+	var msg ReservationMsg
 	if err := json.Unmarshal(data, &msg); err != nil {
+		s.notifyError(msg.SessionID, "Internal Server Error", "reservation")
 		return fmt.Errorf("failed to unmarshal msg, error: %w", err)
 	}
 
@@ -185,18 +274,22 @@ func (s *TicketService) HandleBookingMessage(data []byte) error {
 	defer cancel()
 
 	err := s.redisClient.Watch(ctx, func(tx *redislib.Tx) error {
-		// Step 1: Fetch and decode row data
+		// Fetch and decode row data
 		rowData, err := tx.HGet(ctx, seatsKey, fmt.Sprintf("%d", msg.RowID)).Result()
 		if err == redislib.Nil {
+			s.notifyError(msg.SessionID, "Internal Server Error", "reservation")
 			return fmt.Errorf("row not found")
 		} else if err != nil {
+			s.notifyError(msg.SessionID, "Internal Server Error", "reservation")
 			return fmt.Errorf("failed to get row data: %w", err)
 		}
 
 		var rowInfo struct {
-			Seats string `json:"seats"`
+			RowName string `json:"row_name"`
+			Seats   string `json:"seats"`
 		}
 		if err := json.Unmarshal([]byte(rowData), &rowInfo); err != nil {
+			s.notifyError(msg.SessionID, "Internal Server Error", "reservation")
 			return fmt.Errorf("failed to decode row data: %w", err)
 		}
 
@@ -228,19 +321,23 @@ func (s *TicketService) HandleBookingMessage(data []byte) error {
 		}
 
 		if len(reservedSeats) == 0 {
+			s.notifyError(msg.SessionID, "Data out of date, please refresh.", "reservation")
 			return fmt.Errorf("not enough consecutive seats available")
 		}
 
 		// calculate the new row data
 		rowInfo.Seats = string(seats)
+		fmt.Printf("updated row:%s", rowInfo.Seats)
 		updatedRowData, err := json.Marshal(rowInfo)
 		if err != nil {
+			s.notifyError(msg.SessionID, "Internal Server Error", "reservation")
 			return fmt.Errorf("failed to encode updated row data: %w", err)
 		}
 
 		// Get max consecutive lengths for price blocks
 		priceBlocks, err := tx.ZRangeWithScores(ctx, priceBlocksKey, 0, -1).Result()
 		if err != nil {
+			s.notifyError(msg.SessionID, "Internal Server Error", "reservation")
 			return fmt.Errorf("failed to get price blocks: %w", err)
 		}
 
@@ -254,6 +351,7 @@ func (s *TicketService) HandleBookingMessage(data []byte) error {
 			var rowID, startSeatID, startSeatNum, endSeatID, endSeatNum int
 			_, err := fmt.Sscanf(member, "%d:%d:%d:%d:%d", &rowID, &startSeatID, &startSeatNum, &endSeatID, &endSeatNum)
 			if err != nil {
+				s.notifyError(msg.SessionID, "Internal Server Error", "reservation")
 				return fmt.Errorf("failed to parse price block: %w", err)
 			}
 
@@ -282,17 +380,27 @@ func (s *TicketService) HandleBookingMessage(data []byte) error {
 		// Update data to redis : do this in the end to handle checks and preparations before
 		_, err = tx.HSet(ctx, seatsKey, fmt.Sprintf("%d", msg.RowID), string(updatedRowData)).Result()
 		if err != nil {
+			s.notifyError(msg.SessionID, "Internal Server Error", "failed")
 			return fmt.Errorf("failed to update seats data: %w", err)
 		}
 
 		// Add reservation in redis
-		err = setReservation(ctx, tx, msg.SessionID, msg.EventID, msg.SectionID, msg.RowID, startSeatNumber, msg.Length)
+		err = setReservation(ctx, tx, msg.SessionID, msg.EventID, msg.SectionID, msg.RowID, startSeatNumber, msg.Length, msg.Price, msg.ReservationID)
 		if err != nil {
 			return err
 		}
 
+		// Expand authorization expiration in redis
+		tx.Expire(ctx, "session:"+msg.SessionID, 30*time.Minute)
+
+		// Create Payment Intent and get client secret
+		clientSecretKey, err := s.paymentService.CreatePaymentIntent(ctx, tx, msg.Price*msg.Length, msg.SessionID, msg.ReservationID)
+		if err != nil {
+			s.notifyError(msg.SessionID, "error happened in creating stripe payment", "reservation")
+		}
+
 		// Notify WebSocket client and broadcast the reservation
-		if err := s.NotifyReservation(msg); err != nil {
+		if err := s.NotifyReservation(msg, clientSecretKey); err != nil {
 			log.Printf("failed to notify WebSocket client: %v", err)
 		}
 
@@ -303,44 +411,54 @@ func (s *TicketService) HandleBookingMessage(data []byte) error {
 		return err
 	}, seatsKey, priceBlocksKey)
 
+	if err != nil {
+		s.notifyError(msg.SessionID, "Internal Server Error", "reservation")
+	}
+
 	return err
 }
 
-func (s *TicketService) NotifyReservation(msg dto.ReservationMsg) error {
-	reservationMsg := dto.ReservationMsg{
-		EventID:   msg.EventID,
-		SectionID: msg.SectionID,
-		RowID:     msg.RowID,
-		Price:     msg.Price,
-		Length:    msg.Length,
-		SessionID: msg.SessionID,
+func (s *TicketService) NotifyReservation(msg ReservationMsg, stripeClientSecret string) error {
+	payload := dto.ReservationPayload{
+		EventID:            msg.EventID,
+		SectionID:          msg.SectionID,
+		RowID:              msg.RowID,
+		Price:              msg.Price,
+		Length:             msg.Length,
+		StripeClientSecret: stripeClientSecret,
 	}
 
-	data, err := json.Marshal(reservationMsg)
-	if err != nil {
-		return fmt.Errorf("error marshaling reservation message: %w", err)
-	}
-
-	return s.connectionManager.NotifyReservation(data)
+	return s.connectionManager.NotifyReservation(websocket.GetWebSocketMessageBytes(dto.TypeReservation, payload), msg.SessionID)
 }
 
-func (s *TicketService) broadcastReservation(msg dto.ReservationMsg, priceMaxConsecutive map[int]int) error {
-	var broadcastMsgs dto.BroadcastMsgs
+func (s *TicketService) broadcastReservation(msg ReservationMsg, priceMaxConsecutive map[int]int) error {
+	var payload dto.BroadcastPayload
+
 	for price, length := range priceMaxConsecutive {
-		broadcastMsg := dto.BroadcastMsg{
+		broadcastMsg := struct {
+			EventID   int `json:"event_id"`
+			SectionID int `json:"section_id"`
+			RowID     int `json:"row_id"`
+			Price     int `json:"price"`
+			MaxLength int `json:"max_length"`
+		}{
 			EventID:   msg.EventID,
 			SectionID: msg.SectionID,
 			RowID:     msg.RowID,
 			Price:     price,
 			MaxLength: length,
 		}
-		broadcastMsgs.Messages = append(broadcastMsgs.Messages, broadcastMsg)
+
+		payload.Messages = append(payload.Messages, broadcastMsg)
 	}
 
-	data, err := json.Marshal(broadcastMsgs)
-	if err != nil {
-		return fmt.Errorf("error marshaling broadcast message: %w", err)
-	}
+	return s.connectionManager.BroadcastReservation(websocket.GetWebSocketMessageBytes(dto.TypeBroadcast, payload))
+}
 
-	return s.connectionManager.BroadcastReservation(data)
+func (s *TicketService) notifyError(sessionID, msg, domain string) {
+	data := dto.ErrorPayload{
+		Message: msg,
+		Domain:  domain,
+	}
+	s.connectionManager.NotifyError(websocket.GetWebSocketMessageBytes(dto.TypeError, data), sessionID)
 }

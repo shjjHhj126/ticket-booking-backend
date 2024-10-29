@@ -12,6 +12,11 @@ type PostUser struct {
 	Password string `json:"password" validate:"min=8,max=20"`
 }
 
+type LoginUser struct {
+	Email    string `json:"email" validate:"email,required"`
+	Password string `json:"password" validate:"min=8,max=20"`
+}
+
 type GetUser struct {
 	ID       int    `json:"id"`
 	Username string `json:"username"`
@@ -24,10 +29,22 @@ type SetSeatsPriceDTO struct {
 }
 
 type ReservationDTO struct { //EventID is path variable
-	SectionID int `json:"section_id" validate:"required"`
-	RowID     int `json:"row_id" validate:"required"`
-	Price     int `json:"price" validate:"required,min=0"`
-	Length    int `json:"length" validate:"required,min=1,max=6"`
+	SectionID     int    `json:"section_id" validate:"required"`
+	RowID         int    `json:"row_id" validate:"required"`
+	Price         int    `json:"price" validate:"required,min=0"`
+	Length        int    `json:"length" validate:"required,min=1,max=6"`
+	ReservationID string `json:"reservation_id"`
+}
+
+type DbBookDTO struct {
+	EventID         int    `json:"event_id"`
+	SectionID       int    `json:"section_id"`
+	RowID           int    `json:"row_id"`
+	StartSeatNumber int    `json:"start_seat_number"`
+	Length          int    `json:"length"`
+	Price           int    `json:"price"`
+	UserID          int    `json:"user_id"`
+	ReservationID   string `json:"reservation_id"`
 }
 
 type PostEventDTO struct {
@@ -50,34 +67,4 @@ func validateEventTimes(fl validator.FieldLevel) bool {
 // RegisterCustomValidations registers custom validations for the validator
 func RegisterCustomValidations(v *validator.Validate) {
 	v.RegisterValidation("gtfield", validateEventTimes)
-}
-
-type ReservationMsg struct {
-	EventID   int    `json:"event_id"`
-	SectionID int    `json:"section_id"`
-	RowID     int    `json:"row_id"`
-	Price     int    `json:"price"`
-	Length    int    `json:"length"`
-	SessionID string `json:"session_id"` //track user
-}
-
-type BroadcastMsgs struct {
-	Messages []BroadcastMsg `json:"messages"`
-}
-
-type BroadcastMsg struct {
-	EventID   int `json:"event_id"`
-	SectionID int `json:"section_id"`
-	RowID     int `json:"row_id"`
-	Price     int `json:"price"`
-	MaxLength int `json:"max_length"`
-}
-
-type NotificationMsg struct {
-	EventID   int    `json:"event_id"`
-	SectionID int    `json:"section_id"`
-	RowID     int    `json:"row_id"`
-	Price     int    `json:"price"`
-	Length    int    `json:"length"`
-	SessionID string `json:"session_id"` //to whom
 }

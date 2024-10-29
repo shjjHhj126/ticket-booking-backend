@@ -1,10 +1,13 @@
 package websocket
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 	"ticket-booking-backend/dto"
 
@@ -37,8 +40,9 @@ func (cm *ConnectionManager) AddConnection(sessionID string, wsConn *websocketli
 	cm.activeConnsLock.Lock()
 	defer cm.activeConnsLock.Unlock()
 
-	if _, exists := cm.activeConns[sessionID]; exists {
-		return fmt.Errorf("connection already exists for session ID: %s", sessionID)
+	if existingConn, ok := cm.activeConns[sessionID]; ok {
+		// Close the old connection to prevent stale references and free up resources
+		existingConn.Close()
 	}
 
 	cm.activeConns[sessionID] = wsConn
@@ -82,12 +86,18 @@ func (cm *ConnectionManager) GetAllConnections() map[string]*websocketlib.Conn {
 	return connectionsCopy
 }
 
-func (cm *ConnectionManager) BroadcastReservation(data []byte) error {
-	// var broadcastMsg dto.BroadcastMsg
-	// if err := json.Unmarshal(data, &broadcastMsg); err != nil {
-	// 	return fmt.Errorf("failed to unmarshal msg, error", err)
-	// }
+func GetWebSocketMessageBytes(msgType string, payload interface{}) []byte {
+	msg := dto.BaseMessage{
+		Type:    msgType,
+		Payload: payload,
+	}
+	bytes, _ := json.Marshal(msg)
+	return bytes
+}
 
+//------------------------------------------------------------------
+
+func (cm *ConnectionManager) BroadcastReservation(data []byte) error {
 	connections := cm.GetAllConnections()
 
 	var wg sync.WaitGroup
@@ -110,14 +120,24 @@ func (cm *ConnectionManager) BroadcastReservation(data []byte) error {
 	return nil
 }
 
-func (cm *ConnectionManager) NotifyReservation(data []byte) error {
-	var notificationMsg dto.NotificationMsg
-	if err := json.Unmarshal(data, &notificationMsg); err != nil {
-		return fmt.Errorf("failed to unmarshal msg:%+w", err)
+func (cm *ConnectionManager) NotifyError(data []byte, sessionID string) error {
+
+	conn, err := cm.GetConnectionInfo(sessionID)
+	if err != nil {
+		return fmt.Errorf("failed to get connection info: %+w", err)
 	}
 
-	sessionID := notificationMsg.SessionID
+	err = conn.WriteMessage(websocketlib.TextMessage, data) // Assuming Message is a field in the struct
+	if err != nil {
+		log.Printf("Failed to send message to connection: %v", err)
+		// Todo: handle reconnection or cleanup
+		return err
+	}
 
+	return nil
+}
+
+func (cm *ConnectionManager) NotifyReservation(data []byte, sessionID string) error {
 	conn, err := cm.GetConnectionInfo(sessionID)
 	if err != nil {
 		return fmt.Errorf("failed to get connection info:%+w", err)
@@ -131,4 +151,57 @@ func (cm *ConnectionManager) NotifyReservation(data []byte) error {
 	}
 
 	return nil
+}
+
+// ----------------------------------------------------
+
+func (cm *ConnectionManager) GetReservationData(ctx context.Context, reservationID string) (dto.ReservationPayload, error) {
+	redisKey := fmt.Sprintf("reservation:%s", reservationID)
+	data, err := cm.redisClient.Get(ctx, redisKey).Result()
+	if err != nil {
+		return dto.ReservationPayload{}, fmt.Errorf("Error fetching reservation from Redis for ID %s: %v\n", reservationID, err)
+	}
+
+	//  paymentintent_id:client_secret:session_id:event_id:section_id:row_id:start_seat_number:length:price
+	parts := strings.Split(data, ":")
+	if len(parts) != 9 {
+		return dto.ReservationPayload{}, fmt.Errorf("invalid reservation data format")
+	}
+
+	clientSecret := parts[1]
+
+	eventID, err := strconv.Atoi(parts[3])
+	if err != nil {
+		return dto.ReservationPayload{}, fmt.Errorf("invalid event ID: %v", err)
+	}
+
+	sectionID, err := strconv.Atoi(parts[4])
+	if err != nil {
+		return dto.ReservationPayload{}, fmt.Errorf("invalid section ID: %v", err)
+	}
+
+	rowID, err := strconv.Atoi(parts[5])
+	if err != nil {
+		return dto.ReservationPayload{}, fmt.Errorf("invalid row ID: %v", err)
+	}
+
+	length, err := strconv.Atoi(parts[7])
+	if err != nil {
+		return dto.ReservationPayload{}, fmt.Errorf("invalid length: %v", err)
+	}
+
+	price, err := strconv.Atoi(parts[8])
+	if err != nil {
+		return dto.ReservationPayload{}, fmt.Errorf("invalid price: %v", err)
+	}
+
+	// Construct the ReservationPayload
+	return dto.ReservationPayload{
+		EventID:            eventID,
+		SectionID:          sectionID,
+		RowID:              rowID,
+		Price:              price,
+		Length:             length,
+		StripeClientSecret: clientSecret,
+	}, nil
 }

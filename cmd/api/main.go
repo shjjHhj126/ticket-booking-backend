@@ -23,7 +23,7 @@ func main() {
 	ginServer.AddMiddlewares() //before routes!
 	ginServer.SetupRoutes()
 
-	ginServer.StartConsumers() //running in background
+	ginServer.StartBackgroundRoutines() //running in background
 
 	if err := ginServer.Run(":8080"); err != nil {
 		log.Fatalf("Server failed to start: %v", err)

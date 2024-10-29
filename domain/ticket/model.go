@@ -13,5 +13,6 @@ type Ticket struct {
 type priceInfo struct {
 	SectionID int
 	RowID     int
+	RowName   string
 	Length    int
 }

@@ -1,9 +1,11 @@
 package websocketapi
 
 import (
+	"encoding/json"
 	"log"
 	"net/http"
 	"ticket-booking-backend/cmd/api/websocket"
+	"ticket-booking-backend/dto"
 
 	"github.com/gin-gonic/gin"
 )
@@ -31,19 +33,31 @@ func WebsocketHandler(cm *websocket.ConnectionManager) gin.HandlerFunc {
 		}
 		defer cm.RemoveConnection(sessionID)
 
-		// Read the message sent from frontend over websocket (for testing)
+		// Read the message sent from frontend over websocket
 		for {
-			messageType, p, err := wsConn.ReadMessage()
+			messageType, message, err := wsConn.ReadMessage() //messageType:json
 			if err != nil {
 				log.Println("Read error:", err)
 				return
 			}
 
-			// Echo the received message back to the client
-			if err := wsConn.WriteMessage(messageType, p); err != nil {
-				log.Println("Write error:", err)
-				return
+			var msgData map[string]string
+			if err := json.Unmarshal(message, &msgData); err == nil {
+				if action, ok := msgData["action"]; ok && action == "reconnect" {
+					log.Printf("Reconnect with reservation ID: %s\n", msgData["reservationId"])
+					payload, err := cm.GetReservationData(ctx, msgData["reservationId"])
+					if err != nil {
+						log.Printf("Error parsing reservation data for ID %s: %v\n", msgData["reservationId"], err)
+						return
+					}
+
+					if err := wsConn.WriteMessage(messageType, websocket.GetWebSocketMessageBytes(dto.TypeReservation, payload)); err != nil {
+						log.Println("Write error:", err)
+						return
+					}
+				}
 			}
+
 		}
 	}
 }

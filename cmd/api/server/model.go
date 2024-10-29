@@ -5,6 +5,7 @@ import (
 	"ticket-booking-backend/cmd/api/websocket"
 	"ticket-booking-backend/domain/artist"
 	"ticket-booking-backend/domain/event"
+	"ticket-booking-backend/domain/payment"
 	"ticket-booking-backend/domain/ticket"
 	"ticket-booking-backend/domain/user"
 	"ticket-booking-backend/domain/venue"
@@ -26,12 +27,13 @@ type Server struct {
 	services          Services
 	validator         *validator.Validate
 	sessionManager    *session.SessionManager
-	ConnectionManager *websocket.ConnectionManager
+	connectionManager *websocket.ConnectionManager
 }
 type Services struct {
-	ticketService *ticket.TicketService
-	venueService  *venue.VenueService
-	userService   *user.UserService
-	artistService *artist.ArtistService
-	eventService  *event.EventService
+	ticketService  *ticket.TicketService
+	venueService   *venue.VenueService
+	userService    *user.UserService
+	artistService  *artist.ArtistService
+	eventService   *event.EventService
+	paymentService *payment.PaymentService
 }
